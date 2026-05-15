@@ -76,3 +76,5 @@ You validate edg YAML workload configurations by running `edg validate` and inte
 | `rollback_if` outside transaction | `rollback_if` used in standalone run item | Move inside a transaction |
 | Mutually exclusive fields | Entry combines `if` + `match`, `if` + `rollback_if`, etc. | Use only one special field per entry |
 | Standalone `if`/`match` with `run_weights` | Conditional blocks cannot be weighted | Remove conditionals from weighted sections or remove `run_weights` |
+| `X requires a license` | Feature (embeddings, completions, sync, scaffold, jobs, metrics) used without `--license` or `EDG_LICENSE` | Set `--license` flag or `EDG_LICENSE` env var with a valid pro license key |
+| `license does not include pro entitlement` | License key is valid but missing the pro entitlement | Upgrade license to include pro entitlement |

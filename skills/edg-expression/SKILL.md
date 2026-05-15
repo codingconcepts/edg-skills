@@ -90,7 +90,7 @@ You help users compose, debug, and understand edg expressions. edg uses [expr-la
 | `vector_pareto(dims, clusters, spread, alpha)` | vector literal with Pareto centroid selection |
 | `vector_zipf(dims, clusters, spread, s, v)` | vector literal with Zipfian centroid selection |
 | `vector_norm(dims, clusters, spread, mean, stddev)` | vector literal with normal centroid selection |
-| `embed(text...)` | Real vector embedding via external API (OpenAI-compatible). Variadic, joins args with space. Requires `--embed-api-key` |
+| `embed(text...)` | Real vector embedding via external API (OpenAI-compatible). Variadic, joins args with space. Requires a license and `--embed-api-key` |
 
 ### LLM / Structured Generation
 | Function | Description |
@@ -117,7 +117,7 @@ args:
   - ref_each(local("reviews")).rating
 ```
 
-Requires `--complete-api-key` (or `EDG_COMPLETE_API_KEY`). Configure endpoint with `--complete-url`, model with `--complete-model`. Any OpenAI-compatible API works (Ollama, vLLM, etc.). Tool schema defined in `complete:` YAML section.
+Requires a license and `--complete-api-key` (or `EDG_COMPLETE_API_KEY`). Configure endpoint with `--complete-url`, model with `--complete-model`. Any OpenAI-compatible API works (Ollama, vLLM, etc.). Tool schema defined in `complete:` YAML section.
 
 ### Reference Data
 | Function | Scope | Description |
@@ -397,7 +397,7 @@ query: |-
   VALUES ($1, $2, $3::VECTOR)
 ```
 
-Requires `--embed-api-key` (or `EDG_EMBED_API_KEY`). Configure endpoint with `--embed-url`, model with `--embed-model`, dimensions with `--embed-dimensions`, max batch size with `--embed-max-batch`. Any OpenAI-compatible API works (Ollama, vLLM, etc.).
+Requires a license and `--embed-api-key` (or `EDG_EMBED_API_KEY`). Configure endpoint with `--embed-url`, model with `--embed-model`, dimensions with `--embed-dimensions`, max batch size with `--embed-max-batch`. Any OpenAI-compatible API works (Ollama, vLLM, etc.).
 
 ### Error handling with fail/fatal
 ```yaml
