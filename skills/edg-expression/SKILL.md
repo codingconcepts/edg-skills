@@ -29,6 +29,7 @@ You help users compose, debug, and understand edg expressions. edg uses [expr-la
 | `seq_rand(name)` | Uniform random from generated sequence values |
 | `seq_zipf(name, s, v)` | Zipfian-distributed pick from sequence (hot early values) |
 | `seq_norm(name, mean, stddev)` | Normal-distributed pick from sequence |
+| `seq_pareto(name, alpha)` | Pareto-distributed pick from sequence (continuous power-law) |
 | `seq_exp(name, rate)` | Exponential-distributed pick from sequence |
 | `seq_lognorm(name, mu, sigma)` | Log-normal-distributed pick from sequence |
 | `objectid()` | MongoDB ObjectID (24-char hex string) |
@@ -53,6 +54,7 @@ You help users compose, debug, and understand edg expressions. edg uses [expr-la
 | `norm_f(mean, stddev, min, max, precision)` | Bell curve float |
 | `exp(rate, min, max)` | Exponential decay |
 | `lognorm(mu, sigma, min, max)` | Right-skewed long tail |
+| `pareto(alpha, max)` | Continuous power-law, lower values dominate |
 | `zipf(s, v, max)` | Power-law hot keys |
 | `nurand(A, x, y)` | TPC-C non-uniform random |
 
@@ -62,6 +64,7 @@ You help users compose, debug, and understand edg expressions. edg uses [expr-la
 | `set_rand(values, weights)` | Uniform or weighted pick from a set |
 | `set_norm(values, mean, stddev)` | Normal distribution over set indices |
 | `set_exp(values, rate)` | Exponential over set indices |
+| `set_pareto(values, alpha)` | Pareto over set indices (continuous power-law) |
 | `set_zipf(values, s, v)` | Zipfian over set indices |
 | `set_lognorm(values, mu, sigma)` | Log-normal over set indices |
 
@@ -84,6 +87,7 @@ You help users compose, debug, and understand edg expressions. edg uses [expr-la
 | `json_arr(minN, maxN, pattern)` | Build JSON array |
 | `array(minN, maxN, pattern)` | PostgreSQL array literal |
 | `vector(dims, clusters, spread)` | vector literal with clustered unit vectors (uniform) |
+| `vector_pareto(dims, clusters, spread, alpha)` | vector literal with Pareto centroid selection |
 | `vector_zipf(dims, clusters, spread, s, v)` | vector literal with Zipfian centroid selection |
 | `vector_norm(dims, clusters, spread, mean, stddev)` | vector literal with normal centroid selection |
 | `embed(text...)` | Real vector embedding via external API (OpenAI-compatible). Variadic, joins args with space. Requires `--embed-api-key` |
@@ -127,6 +131,7 @@ Requires `--complete-api-key` (or `EDG_COMPLETE_API_KEY`). Configure endpoint wi
 | `ref_norm(name, mean, stddev)` | None | Row picked via normal distribution |
 | `ref_exp(name, rate)` | None | Row picked via exponential distribution |
 | `ref_lognorm(name, mu, sigma)` | None | Row picked via log-normal distribution |
+| `ref_pareto(name, alpha)` | None | Row picked via Pareto distribution |
 | `ref_zipf(name, s, v)` | None | Row picked via Zipfian distribution |
 
 ### Aggregation (over named datasets)
@@ -299,6 +304,7 @@ args:
 ```yaml
 args:
   - ref_zipf('fetch_ids', 2.0, 1.0).id        # heavy skew toward early rows
+  - ref_pareto('fetch_ids', 2.0).id            # continuous power-law, first rows dominate
   - ref_norm('fetch_ids', 0.5, 0.2).id         # bell curve centered at midpoint
   - ref_exp('fetch_ids', 1.5).id               # exponential decay from first row
   - ref_lognorm('fetch_ids', 0.0, 0.5).id      # right-skewed access pattern

@@ -111,6 +111,7 @@ A complete edg YAML config with all applicable sections:
 - `uniform(min, max)` / `uniform_f(min, max, precision)` for uniform random numbers
 - `norm(mean, stddev, min, max)` / `norm_f(mean, stddev, min, max, precision)` for normal distribution
 - `zipf(s, v, max)` for hot-key / power-law workloads
+- `pareto(alpha, max)` for continuous power-law distribution (lower values dominate)
 - `exp(rate, min, max)` for exponential distribution
 - `timestamp(min, max)` for random timestamps
 - `timestamp_step()` for the next monotonic timestamp (requires `timestamp_steps` in `count:`)
@@ -122,7 +123,7 @@ A complete edg YAML config with all applicable sections:
 - `seq_global("name")` for globally unique sequences shared across all workers (requires `seq:` config section)
 - `seq_alpha_global("name")` for globally unique alpha sequences across all workers (requires `seq:` config with `length`)
 - `seq_rand("name")` for uniform random picks from already-generated sequence values
-- `seq_zipf("name", s, v)` / `seq_norm("name", mean, stddev)` / `seq_exp("name", rate)` / `seq_lognorm("name", mu, sigma)` for distribution-based picks from sequence values
+- `seq_zipf("name", s, v)` / `seq_pareto("name", alpha)` / `seq_norm("name", mean, stddev)` / `seq_exp("name", rate)` / `seq_lognorm("name", mu, sigma)` for distribution-based picks from sequence values
 - `embed(text...)` for real vector embeddings via an external API (OpenAI-compatible). Variadic - joins args with space. Requires `--embed-api-key` or `EDG_EMBED_API_KEY`. Configure endpoint with `--embed-url`, model with `--embed-model`, dimensions with `--embed-dimensions`. Use for semantic similarity search with real embeddings instead of synthetic `vector()` clusters
 - `complete(tool_name, prompt)` for LLM-generated structured data via tool calling. Returns a map; access fields with `.field`. Define tools in `complete:` YAML section. Use `locals` to call once per row and access multiple fields. Retries up to 3 times on missing/invalid tool calls, validates response types against schema. 120s per-request timeout. Requires `--complete-api-key` or `EDG_COMPLETE_API_KEY`. Configure endpoint with `--complete-url`, model with `--complete-model`. Any OpenAI-compatible API works (Ollama, vLLM, etc.)
 - `complete_array(tool_name, prompt, count)` for generating N structured items in a single LLM call. Returns `[]map`; use with `ref_each(local(...))` to iterate. Tool schema auto-wrapped in array request. Memoized by (tool, prompt, count). Same config flags as `complete()`
@@ -141,7 +142,7 @@ A complete edg YAML config with all applicable sections:
 - Unlike `seq(start, step)` which is per-worker, `seq_global` is shared across all workers
 - Sequence counter continues across seed and run phases
 - To reference existing sequence values, use `seq_rand("name")` (uniform) or distribution variants:
-  `seq_zipf("name", s, v)`, `seq_norm("name", mean, stddev)`, `seq_exp("name", rate)`, `seq_lognorm("name", mu, sigma)`
+  `seq_zipf("name", s, v)`, `seq_pareto("name", alpha)`, `seq_norm("name", mean, stddev)`, `seq_exp("name", rate)`, `seq_lognorm("name", mu, sigma)`
 - These compute valid values from `start + index * step` (no values stored in memory, works with any step)
 
 ### Alpha sequences
