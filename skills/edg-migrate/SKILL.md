@@ -81,6 +81,17 @@ Prefer `__values__` over driver-specific batch expansion. It generates a standar
     INSERT INTO t (email) __values__
 ```
 
+`__values__` also works with `type: exec`/`query` when using batch-expanding arg functions (`gen_batch()`, `batch()`, `ref_each()`). All arg sets are collapsed into a single VALUES clause:
+
+```yaml
+- name: seed_ids
+  type: exec
+  args:
+    - batch(5)
+  query: |-
+    INSERT INTO t (id) __values__
+```
+
 When migrating between SQL drivers (pgx, mysql, mssql, spanner, dsql), `__values__` queries need no changes. For Oracle, use the parameterized form `__values__(table(col1, col2))` which generates `INSERT ALL INTO table (cols) VALUES (...) ... SELECT 1 FROM DUAL`. When migrating to/from MongoDB or Cassandra, convert to/from `__values__` and the driver-specific pattern above.
 
 When migrating old driver-specific batch patterns (OPENJSON, UNNEST/SPLIT, JSON_TABLE) to `__values__`:
@@ -88,8 +99,7 @@ When migrating old driver-specific batch patterns (OPENJSON, UNNEST/SPLIT, JSON_
 - Replace driver-specific SQL with `__values__`
 - Move any SQL-side arithmetic into arg expressions (e.g., `CAST(v3 AS INT) * 8` becomes `gen('number:0,2') * 8` in args)
 - Use `arg(N)` to share computed values across args in the same row
-
-> **Warning**: Do not use `gen_batch()` with `__values__`. `gen_batch` returns pre-joined `RawSQL` strings designed for the old batch expansion patterns. Use `type: exec_batch` with per-row expressions like `gen('email')` instead.
+- `gen_batch()` + `__values__` is supported (the CSV values are expanded into proper VALUES tuples)
 
 ### Upsert / Merge
 

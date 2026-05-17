@@ -268,7 +268,7 @@ A complete edg YAML config with all applicable sections:
 - Use `iter()` for a 1-based row counter within batch queries (resets per query)
 - Use `uniq("expression")` to retry a generator until a unique value is produced (e.g., `uniq("gen('airlineairportiata')")` for unique IATA codes). Defaults to 100 retries; override with `uniq("expression", 500)`
 - For composite uniqueness across columns, pass multiple expressions: `uniq("gen('first_name')", "gen('last_name')")[0]` and `...[1]`. Returns `[]any`; same-row calls with identical expressions return cached tuple
-- **`__values__` token (recommended)**: Use `__values__` in the query to generate a multi-row `VALUES` clause instead of driver-specific batch expansion (`unnest`/`JSON_TABLE`/`OPENJSON`). Produces `VALUES (v1, v2), (v3, v4), ...` - one INSERT per batch. Works with pgx, mysql, mssql, spanner, dsql. For Oracle, use `__values__(table(col1, col2))` to generate `INSERT ALL INTO table (cols) VALUES (...) ... SELECT 1 FROM DUAL`. Does not work with MongoDB or Cassandra. Also supports upsert (`ON CONFLICT`/`ON DUPLICATE KEY`/`MERGE`) and update via CTE. **Do not use `gen_batch()` with `__values__`** - `gen_batch` returns pre-joined `RawSQL` strings designed for the old batch expansion patterns and will produce unquoted values. Use per-row expressions like `gen('email')` instead
+- **`__values__` token (recommended)**: Use `__values__` in the query to generate a multi-row `VALUES` clause instead of driver-specific batch expansion (`unnest`/`JSON_TABLE`/`OPENJSON`). Produces `VALUES (v1, v2), (v3, v4), ...` - one INSERT per batch. Works with `exec_batch`/`query_batch` and also with `type: exec`/`query` when using batch-expanding args (`gen_batch()`, `batch()`, `ref_each()`). Works with pgx, mysql, mssql, spanner, dsql. For Oracle, use `__values__(table(col1, col2))` to generate `INSERT ALL INTO table (cols) VALUES (...) ... SELECT 1 FROM DUAL`. Does not work with MongoDB or Cassandra. Also supports upsert (`ON CONFLICT`/`ON DUPLICATE KEY`/`MERGE`) and update via CTE
 
 ### Transactions
 - Group related `run` queries into an explicit `BEGIN/COMMIT` block using the `transaction` key
@@ -878,7 +878,6 @@ Do NOT generate configs with these errors:
 
 | Mistake | Why it breaks | Fix |
 |---|---|---|
-| `gen_batch()` with `__values__` | `gen_batch` returns pre-joined RawSQL strings - produces unquoted garbage in VALUES clause | Use per-row expressions like `gen('email')` with `__values__` |
 | Missing `type: query` on `init` queries | Defaults to `exec`, won't populate the named dataset | Add `type: query` to every `init` entry |
 | `ref_rand('x')` before dataset `x` is populated | No `init` or `seed` query with `type: query` named `x` exists | Add an `init` query with `name: x` and `type: query` |
 | `exec_batch`/`query_batch` inside `transaction:` | Not supported - batch types cannot be used in transactions | Use `exec`/`query` inside transactions |
@@ -935,7 +934,7 @@ When the user wants to test dual-write consistency, CDC pipelines, or cross-data
 - **Matching schemas**: Same table names, column names, and logical types. SQL dialect differs (e.g., `DEFAULT NOW()` vs `DEFAULT CURRENT_TIMESTAMP`).
 - **Matching seed args**: Both configs must use identical `args` expressions (same `gen()`, `ref_rand()`, `uniform()`, `set_rand()`, etc.). The `--rng-seed` flag + PRNG re-seeding ensures identical values. Fetched datasets (`ref_rand`) are sorted deterministically before use, so different database row orderings won't cause divergence.
 - **Use `exec_batch`**: Sync configs should use `type: exec_batch` with `count` and `size` for efficient bulk inserts.
-- **Driver-specific batch SQL**: Use `unnest(string_to_array('$N', __sep__))` for pgx and `JSON_TABLE(CONCAT(...))` for MySQL, or use `__values__` for a cross-driver multi-row VALUES clause (works with pgx, mysql, mssql, spanner, dsql, and oracle via `__values__(table(cols))`).
+- **Batch SQL**: Use `__values__` for a cross-driver multi-row VALUES clause (works with pgx, mysql, mssql, spanner, dsql, and oracle via `__values__(table(cols))`). Also works with `type: exec` + `gen_batch()`/`batch()`/`ref_each()`.
 - **Precision for floats**: When comparing across SQL and NoSQL databases, use `uniform_f(min, max, precision)` to generate floats with fixed decimal places. This avoids false mismatches from floating-point representation differences (e.g. `364.8` vs `364.80`).
 - **No `run` section**: Sync configs only need `up`, `seed`, `deseed`, and `down`. The benchmark workload is separate.
 - **Shared globals**: Both configs should use the same `globals` values (row counts, batch sizes).
