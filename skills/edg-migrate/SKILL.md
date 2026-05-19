@@ -1,19 +1,19 @@
 ---
 name: edg-migrate
-description: Convert an edg YAML config from one database driver to another (e.g., pgx to mysql, mssql to oracle, pgx to mongodb, pgx to cassandra).
+description: Convert an edg config between database drivers (e.g., pgx to mysql) or between formats (YAML to DSL, DSL to YAML).
 user-invocable: true
 ---
 
 # edg Config Migrator
 
-You convert edg YAML workload configurations between database drivers. Given a config written for one driver and a target driver, you produce a working config for the target.
+You convert edg workload configurations between database drivers and between formats (YAML ↔ DSL). Given a config written for one driver or format and a target, you produce a working config.
 
 ## Input
 
 The user provides:
-- A path to an existing edg config (or pastes the YAML)
+- A path to an existing edg config (YAML or DSL)
 - The source driver (infer from config if not stated)
-- The target driver
+- The target driver and/or target format
 
 ## Migration Rules
 
@@ -195,7 +195,59 @@ When migrating SQL configs to Cassandra:
 - Add `DROP KEYSPACE IF EXISTS ks` at end of `down` section
 - **Transactions**: edg supports `transaction:` blocks for Cassandra using logged batches. Reads execute immediately; writes are buffered and committed atomically. Preserve `transaction:` / `locals` / `rollback_if` syntax when migrating to Cassandra
 
-## Process
+## Format Migration (YAML ↔ DSL)
+
+edg supports two equivalent config formats. The format is detected by file extension: `.edg` → DSL, `.yaml`/`.yml` → YAML.
+
+### YAML → DSL
+
+Convert when the user wants a more compact config. Apply these transformations:
+
+| YAML | DSL |
+|---|---|
+| `globals:` with `key: value` entries | `let key = value` (one per line) |
+| `objects:` with named field maps | `object name { field = expr }` |
+| `objects:` with `__sub__:` fields | `object name { field = expr  sub { field = expr } }` |
+| `reference:` with named row arrays | `ref name [ {k: v, ...} ]` |
+| Section entries with `name:`, `query:`, `args:` | `name \`SQL\` (args)` |
+| `type: exec_batch` with `count:`/`size:` | `name(count: N, size: M) \`SQL\` (args)` |
+| `object: objname` on a query | `name(object: objname) \`SQL\`` |
+| `run_weights:` | `weights { name = N }` |
+| `expectations:` | `expect { expr }` |
+| `workers:` with `rate:` | `workers { name(rate: R) \`SQL\` (args) }` |
+| `transaction:` with `locals:` and `queries:` | `transaction name { let x = expr  query \`SQL\` (args) }` |
+| Named args (map-style `args:`) | `(name: expr, name: expr)` |
+| Positional args (list-style `args:`) | `(expr, expr)` |
+
+**Cannot convert to DSL** (keep as YAML):
+- `stages:` section
+- `if:`/`match:` conditionals
+- `seq:` config section
+- `print:`/`post_print:` fields
+- `expressions:` section
+- `complete:` section (LLM tool definitions)
+- `rollback_if:` entries
+
+If the source uses any of these, warn the user that those features require YAML.
+
+**Query type inference**: In DSL, `type` is inferred from SQL verb. Only add `type:` option when the inference is wrong (e.g., a SELECT that should be `exec`).
+
+### DSL → YAML
+
+Convert when the user needs features only available in YAML. Apply the reverse transformations:
+
+- `let key = value` → `globals:` entry
+- `object name { ... }` → `objects:` entry with field map
+- `ref name [...]` → `reference:` entry
+- `name \`SQL\` (args)` → entry with `name:`, `query: \|-`, `args:` list
+- Query options → top-level fields (`count:`, `size:`, `object:`, `type:`, etc.)
+- `weights { ... }` → `run_weights:`
+- `expect { ... }` → `expectations:`
+- `transaction name { ... }` → `transaction:` with `locals:` and `queries:`
+
+**Important**: Add `type: query` to any SELECT queries in `init`/`seed` sections. DSL infers this, but YAML defaults to `exec`.
+
+## Driver Migration Process
 
 1. Read the source config
 2. Identify all SQL patterns that need driver-specific translation
@@ -209,3 +261,12 @@ When migrating SQL configs to Cassandra:
    edg stage --config <path> --format sql -o ./preview
    ```
    This generates data to files, letting the user inspect SQL syntax, value formatting, and data distributions for the target driver before connecting to a real database.
+
+## Format Migration Process
+
+1. Read the source config
+2. Determine target format from user request or file extension
+3. Apply the format transformation rules above
+4. If converting YAML → DSL, check for YAML-only features and warn if present
+5. Write the output with the correct extension (`.edg` or `.yaml`)
+6. Validate: `edg validate config --config <path>`

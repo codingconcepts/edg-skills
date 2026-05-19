@@ -1,12 +1,12 @@
 ---
 name: edg-config
-description: Generate or modify edg YAML workload configurations from a natural language description of the desired schema and workload.
+description: Generate or modify edg workload configurations (YAML or DSL) from a natural language description of the desired schema and workload.
 user-invocable: true
 ---
 
 # edg Config Generator
 
-You are an expert at creating edg (Expression-based Data Generator) workload configurations. When the user describes a database schema and workload, generate a complete, valid edg YAML config file.
+You are an expert at creating edg (Expression-based Data Generator) workload configurations. When the user describes a database schema and workload, generate a complete, valid edg config file in either YAML or DSL format.
 
 ## Input
 
@@ -15,13 +15,15 @@ The user will describe:
 - The type of workload (read-heavy, write-heavy, mixed)
 - The target database driver (pgx, mysql, mssql, oracle, dsql, spanner, mongodb, cassandra)
 - Any specific data distribution requirements (hot keys, skewed access, etc.)
+- Optionally, the output format: YAML (`.yaml`) or DSL (`.edg`)
 
 If the user does not specify a driver, default to `pgx`.
+If the user does not specify a format, default to **YAML**. Use **DSL** when the user explicitly requests it (e.g., "use DSL", "generate .edg", "use the new format") or when the workload is simple and query-heavy (no stages, conditionals, or LLM features).
 
 ## Workflow
 
 1. **Read examples.** Before generating, read 1-2 relevant examples from `examples/` that match the target driver and feature complexity (see Example Grounding below).
-2. **Generate.** Write the config to a file (default: `workload.yaml` in the working directory, or a user-specified path).
+2. **Generate.** Write the config to a file (default: `workload.yaml` or `workload.edg` in the working directory, or a user-specified path).
 3. **Validate.** Run `edg validate config --config <path>` and read the output.
 4. **Fix and retry.** If validation fails, read the error message, fix the config, and re-validate. Repeat up to 3 times.
 5. **Preview.** After validation passes, suggest staging to preview generated data:
@@ -61,6 +63,123 @@ Match user request features to example directories:
 | Invoice line items | `invoice_lines/` |
 
 If the target driver doesn't have an example in that directory, read the `crdb.yaml` version and adapt the SQL dialect.
+
+## Choosing YAML vs DSL
+
+edg supports two equivalent config formats. The format is detected by file extension: `.edg` → DSL, `.yaml`/`.yml` → YAML.
+
+**Use YAML when:**
+- The workload needs stages, conditionals (`if`/`match`), `print`/`post_print`, `seq:` config, `expressions:` section, or `complete:` tool definitions - these are YAML-only
+- The user doesn't specify a format preference
+- The workload is complex with many options per query
+
+**Use DSL when:**
+- The user explicitly requests DSL or `.edg` format
+- The workload is query-heavy with simple structure - DSL cuts config size by ~60%
+
+### DSL Feature Support
+
+| Feature | DSL | YAML |
+|---|---|---|
+| Globals (`let`) | Yes | Yes |
+| Objects with `sub` | Yes | Yes |
+| Reference data (`ref`) | Yes | Yes |
+| All lifecycle sections (up/seed/init/run/deseed/down) | Yes | Yes |
+| Transactions with locals | Yes | Yes |
+| Weights | Yes | Yes |
+| Expectations | Yes | Yes |
+| Workers | Yes | Yes |
+| Query options (count, size, object, type, template, prepared, batch_format) | Yes | Yes |
+| Named and positional args | Yes | Yes |
+| Stages | No | Yes |
+| Conditionals (if/match) | No | Yes |
+| Global sequences (`seq:` config) | No | Yes |
+| Print / post_print | No | Yes |
+| Expressions section | No | Yes |
+| Complete section (LLM tools) | No | Yes |
+
+### DSL Syntax Quick Reference
+
+```edg
+# Globals
+let users = 10000
+let batch_size = 1000
+
+# Objects
+object customer {
+  email = gen('email')
+  name = gen('name')
+  sub {
+    items = obj_n('item', 1, 5)
+  }
+}
+
+# Reference data
+ref products [
+  {id: "abc", name: "Latte", price: 3.50}
+  {id: "def", name: "Espresso", price: 2.50}
+]
+
+# Sections: name(options)? `SQL` (args)?
+up {
+  create_users `CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY DEFAULT gen_random_uuid(),
+    email STRING NOT NULL
+  )`
+}
+
+seed {
+  seed_users(count: users, size: batch_size, object: customer)
+    `INSERT INTO users (email) __values__`
+
+  fetch_users `SELECT id, email FROM users`
+}
+
+init {
+  load_users `SELECT id FROM users LIMIT $1` (limit: 5000)
+}
+
+run {
+  get_user `SELECT * FROM users WHERE id = $1` (ref_rand('load_users').id)
+
+  transaction transfer {
+    let amount = gen('number:1,100')
+    debit `UPDATE accounts SET balance = balance - $1 WHERE id = $2` (
+      local('amount'), ref_diff('accounts').id
+    )
+    credit `UPDATE accounts SET balance = balance + $1 WHERE id = $2` (
+      local('amount'), ref_rand('accounts').id
+    )
+  }
+}
+
+weights {
+  get_user = 70
+  transfer = 30
+}
+
+workers {
+  cleanup(rate: 1/10s) `DELETE FROM sessions WHERE expires_at < now()`
+}
+
+expect {
+  error_rate < 1
+  p99 < 100
+}
+
+deseed { truncate_users `TRUNCATE TABLE users CASCADE` }
+down { drop_users `DROP TABLE IF EXISTS users` }
+```
+
+### DSL Rules
+
+- **SQL uses backticks**, not `query: |-`
+- **Args follow SQL** in parentheses: `` `SELECT ...` (arg1, arg2) ``
+- **Options follow name** in parentheses: `query_name(count: 100, size: 50) \`SQL\``
+- **Query type is inferred** from SQL verb (SELECT → query, INSERT/CREATE/DROP → exec). Override with `type:` in options
+- **Comments** use `#`
+- **No `type: exec`** needed for DDL - it's inferred
+- **Workers** use `rate:` as a query option: `cleanup(rate: 1/10s) \`SQL\``
 
 ## Output
 
@@ -431,13 +550,19 @@ A complete edg YAML config with all applicable sections:
   - **Bounded drift (arctan saturation)**: `base + (2.0 * atan(sqrt(global_iter()) / 100.0) / pi) * max_drift + noise`
 - For periodic patterns, set the period relative to estimated total iterations (e.g., `period = total_iterations / 2` for 2 visible cycles)
 
-### Formatting
+### Formatting (YAML)
 - Use `|-` for multi-line SQL strings
 - Use `>-` for single-line SQL that wraps for readability
 - Group related queries with YAML comments
 - Name every query descriptively (e.g., `create_users`, `seed_orders`, `fetch_user_by_id`)
 
-## Example
+### Formatting (DSL)
+- SQL goes in backticks - no indentation concerns
+- Single-line sections are fine: `deseed { truncate_users \`TRUNCATE TABLE users CASCADE\` }`
+- Use `#` for comments
+- Name every query descriptively
+
+## YAML Example
 
 ```yaml
 globals:
@@ -545,6 +670,82 @@ down:
   - name: drop_users
     type: exec
     query: DROP TABLE IF EXISTS users
+```
+
+## DSL Example
+
+The same workload in DSL format (~60% smaller):
+
+```edg
+let users = 10000
+let orders = 50000
+let batch_size = 1000
+
+up {
+  create_users `CREATE TABLE IF NOT EXISTS users (
+    id UUID PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT now()
+  )`
+
+  create_orders `CREATE TABLE IF NOT EXISTS orders (
+    id UUID PRIMARY KEY,
+    user_id UUID NOT NULL REFERENCES users(id),
+    total DECIMAL(10,2) NOT NULL,
+    status VARCHAR(20) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT now()
+  )`
+}
+
+seed {
+  seed_users(count: users, size: batch_size)
+    `INSERT INTO users (id, email, name) __values__`
+    (uuid_v7(), gen('email'), gen('firstname') + ' ' + gen('lastname'))
+
+  seed_orders(count: orders, size: batch_size)
+    `INSERT INTO orders (id, user_id, total, status) __values__`
+    (
+      uuid_v7(),
+      ref_rand('fetch_users').id,
+      uniform_f(5.00, 500.00, 2),
+      set_rand(['pending', 'shipped', 'delivered', 'cancelled'], [40, 30, 25, 5])
+    )
+}
+
+init {
+  fetch_users `SELECT id, email FROM users`
+}
+
+run {
+  get_user_orders
+    `SELECT id, total, status, created_at
+     FROM orders
+     WHERE user_id = $1
+     ORDER BY created_at DESC
+     LIMIT 10`
+    (ref_rand('fetch_users').id)
+
+  place_order
+    `INSERT INTO orders (id, user_id, total, status)
+     VALUES ($1, $2, $3, 'pending')`
+    (uuid_v7(), ref_rand('fetch_users').id, uniform_f(5.00, 500.00, 2))
+}
+
+weights {
+  get_user_orders = 70
+  place_order = 30
+}
+
+deseed {
+  truncate_orders `TRUNCATE TABLE orders`
+  truncate_users `TRUNCATE TABLE users`
+}
+
+down {
+  drop_orders `DROP TABLE IF EXISTS orders`
+  drop_users `DROP TABLE IF EXISTS users`
+}
 ```
 
 ## Database-Specific Patterns
@@ -891,6 +1092,10 @@ Do NOT generate configs with these errors:
 | Run items without `name` when `run_weights` is set | All run items need names for weight matching | Add `name` to every run item |
 | `- rollback` outside a transaction | `rollback` only valid inside transactions | Use `- noop` or remove the entry |
 | Standalone `if`/`match` with `run_weights` | Conditional blocks can't be weighted | Remove conditionals from weighted run or remove `run_weights` |
+| Using DSL for stages/conditionals/seq/print/complete | These features are YAML-only | Switch to `.yaml` format |
+| Using `query: \|-` syntax in `.edg` files | DSL uses backticks for SQL, not YAML block scalars | Use `` `SQL here` `` |
+| Missing backticks around SQL in DSL | Parser expects backtick-delimited SQL | Wrap SQL in backticks |
+| Using `name:` / `type:` YAML keys in DSL | DSL infers type from SQL verb; name is a bare identifier | Use DSL syntax: `query_name \`SQL\`` |
 
 ## Staging (file output without a database)
 

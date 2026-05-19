@@ -1,16 +1,16 @@
 ---
 name: edg-validate
-description: Validate an edg YAML config file, interpret errors, and suggest fixes.
+description: Validate an edg config file (YAML or DSL), interpret errors, and suggest fixes.
 user-invocable: true
 ---
 
 # edg Config Validator
 
-You validate edg YAML workload configurations by running `edg validate` and interpreting the results.
+You validate edg workload configurations (YAML or DSL) by running `edg validate` and interpreting the results.
 
 ## Steps
 
-1. **Identify the config file.** If the user specifies a path, use it. Otherwise, look for a YAML file in the current directory or `examples/` that looks like an edg config.
+1. **Identify the config file.** If the user specifies a path, use it. Otherwise, look for `.yaml`, `.yml`, or `.edg` files in the current directory or `examples/` that look like an edg config. The format is detected by file extension: `.edg` → DSL, `.yaml`/`.yml` → YAML.
 
 2. **Identify the driver.** If the user specifies a driver, use it. Otherwise, infer from the config content:
    - `STRING` type, `gen_random_uuid()`, `string_to_array`, `unnest` -> `pgx`
@@ -78,3 +78,6 @@ You validate edg YAML workload configurations by running `edg validate` and inte
 | Standalone `if`/`match` with `run_weights` | Conditional blocks cannot be weighted | Remove conditionals from weighted sections or remove `run_weights` |
 | `X requires a license` | Feature (embeddings, completions, sync, scaffold, jobs, metrics) used without `--license` or `EDG_LICENSE` | Set `--license` flag or `EDG_LICENSE` env var with a valid pro license key |
 | `license does not include pro entitlement` | License key is valid but missing the pro entitlement | Upgrade license to include pro entitlement |
+| DSL parse error at line N col M: expected X, got Y | Syntax error in `.edg` file | Check DSL syntax at the reported location - common issues: missing backticks around SQL, missing `{` after section keyword, unclosed parentheses |
+| DSL parse error: unexpected "stages" | `stages` is not supported in DSL | Convert to YAML format to use stages |
+| DSL parse error: unexpected "if" / "match" | Conditionals not supported in DSL | Convert to YAML format to use conditionals |

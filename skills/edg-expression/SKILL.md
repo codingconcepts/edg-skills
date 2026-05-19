@@ -15,6 +15,29 @@ You help users compose, debug, and understand edg expressions. edg uses [expr-la
 - Debug expression syntax errors
 - Suggest the REPL for interactive testing: `edg repl`
 
+## Expressions in YAML vs DSL
+
+All expressions are identical in both formats - same functions, same syntax. Only the surrounding config structure differs:
+
+**YAML:**
+```yaml
+args:
+  - ref_rand('fetch_users').id
+  - gen('email')
+```
+
+**DSL (positional):**
+```edg
+query_name `SELECT ...` (ref_rand('fetch_users').id, gen('email'))
+```
+
+**DSL (named):**
+```edg
+query_name `SELECT ...` (user_id: ref_rand('fetch_users').id, email: gen('email'))
+```
+
+When helping with expressions, ask which format the user is working with if it affects the answer (e.g., wrapping syntax). The expression itself is always the same.
+
 ## Quick Reference
 
 ### Identifiers
