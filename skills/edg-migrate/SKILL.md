@@ -215,6 +215,10 @@ Convert when the user wants a more compact config. Apply these transformations:
 | `run_weights:` | `weights { name = N }` |
 | `expectations:` | `expect { expr }` |
 | `workers:` with `rate:` | `workers { name(rate: R) \`SQL\` (args) }` |
+| `workers:` with `delay:` | `workers { name(delay: D) \`SQL\` (args) }` |
+| `ignore: true` on a query | `name(ignore: true) \`SQL\`` |
+| `request_timeout:` on a query | `name(request_timeout: 500ms) \`SQL\`` |
+| `wait:` on a query | `name(wait: 1s) \`SQL\`` |
 | `transaction:` with `locals:` and `queries:` | `transaction name { let x = expr  query \`SQL\` (args) }` |
 | Named args (map-style `args:`) | `(name: expr, name: expr)` |
 | Positional args (list-style `args:`) | `(expr, expr)` |
@@ -223,10 +227,9 @@ Convert when the user wants a more compact config. Apply these transformations:
 - `stages:` section
 - `if:`/`match:` conditionals
 - `seq:` config section
-- `print:`/`post_print:` fields
+- `print:`/`post_print:` with custom `agg` (simple inline `print`/`post_print` works in DSL)
 - `expressions:` section
 - `complete:` section (LLM tool definitions)
-- `rollback_if:` entries
 
 If the source uses any of these, warn the user that those features require YAML.
 
@@ -253,7 +256,7 @@ Convert when the user needs features only available in YAML. Apply the reverse t
 2. Identify all SQL patterns that need driver-specific translation
 3. Apply the mappings above
 4. Preserve all edg expression args unchanged (they are driver-agnostic)
-5. Preserve globals, expressions, reference, stages (including per-stage `run_weights`), top-level run_weights, and other non-SQL sections unchanged
+5. Preserve globals, expressions, reference, stages (including per-stage `run_weights`), top-level run_weights, `ignore`, `request_timeout`, `wait`, worker `delay`, and other non-SQL sections unchanged
 6. If the source uses `batch_format`, adjust for the target driver
 7. Remind the user to validate: `edg validate config --driver <target> --config <path>`
 8. Suggest staging to preview the migrated output without a database:

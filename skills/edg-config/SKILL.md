@@ -45,6 +45,7 @@ Match user request features to example directories:
 | Batch inserts | `batch/` |
 | Transactions | `transaction/` |
 | Background workers | `workers/` |
+| Event-driven hooks (HTTP/Kafka) | `hooks/http`, `hooks/kafka` |
 | Staged workloads | `stages/`, `stages_run_weights/` |
 | Temporal patterns | `temporal_patterns/` |
 | Interval-aligned timestamps | `timestamp_step/` |
@@ -89,12 +90,16 @@ edg supports two equivalent config formats. The format is detected by file exten
 | Weights | Yes | Yes |
 | Expectations | Yes | Yes |
 | Workers | Yes | Yes |
-| Query options (count, size, object, type, template, prepared, batch_format) | Yes | Yes |
+| Hooks | Yes | Yes |
+| Query options (count, size, object, type, template, prepared, batch_format, ignore, request_timeout, workers, rollback_if, print, post_print) | Yes | Yes |
 | Named and positional args | Yes | Yes |
+| Worker delay (one-shot) | Yes | Yes |
+| Rollback_if (inline) | Yes | Yes |
 | Stages | No | Yes |
 | Conditionals (if/match) | No | Yes |
 | Global sequences (`seq:` config) | No | Yes |
-| Print / post_print | No | Yes |
+| Print / post_print (inline) | Yes | Yes |
+| Print / post_print (custom agg) | No | Yes |
 | Expressions section | No | Yes |
 | Complete section (LLM tools) | No | Yes |
 
@@ -160,6 +165,7 @@ weights {
 
 workers {
   cleanup(rate: 1/10s) `DELETE FROM sessions WHERE expires_at < now()`
+  add_index(delay: 30s) `CREATE INDEX IF NOT EXISTS idx_email ON users (email)`
 }
 
 expect {
@@ -174,12 +180,12 @@ down { drop_users `DROP TABLE IF EXISTS users` }
 ### DSL Rules
 
 - **SQL uses backticks**, not `query: |-`
-- **Args follow SQL** in parentheses: `` `SELECT ...` (arg1, arg2) ``
+- **Args follow SQL** in parentheses: `` `SELECT ...` (arg1, arg2) ``. The opening `(` must be on the **same line** as the closing backtick - a newline before `(` makes the parser treat it as a new query identifier
 - **Options follow name** in parentheses: `query_name(count: 100, size: 50) \`SQL\``
 - **Query type is inferred** from SQL verb (SELECT → query, INSERT/CREATE/DROP → exec). Override with `type:` in options
 - **Comments** use `#`
 - **No `type: exec`** needed for DDL - it's inferred
-- **Workers** use `rate:` as a query option: `cleanup(rate: 1/10s) \`SQL\``
+- **Workers** use `rate:` or `delay:` as a query option: `cleanup(rate: 1/10s) \`SQL\`` or `migrate(delay: 30s) \`SQL\``
 
 ## Output
 
@@ -247,6 +253,7 @@ A complete edg YAML config with all applicable sections:
 - `complete(tool_name, prompt)` for LLM-generated structured data via tool calling. Returns a map; access fields with `.field`. Define tools in `complete:` YAML section. Use `locals` to call once per row and access multiple fields. Retries up to 3 times on missing/invalid tool calls, validates response types against schema. 120s per-request timeout. Requires a license and `--complete-api-key` or `EDG_COMPLETE_API_KEY`. Configure endpoint with `--complete-url`, model with `--complete-model`. Any OpenAI-compatible API works (Ollama, vLLM, etc.)
 - `complete_array(tool_name, prompt, count)` for generating N structured items in a single LLM call. Returns `[]map`; use with `ref_each(local(...))` to iterate. Tool schema auto-wrapped in array request. Memoized by (tool, prompt, count). Same config flags and license requirement as `complete()`
 - `global_iter()` for a monotonic iteration counter shared across all workers. Increments with every query execution. Use with math functions and globals to make data change shape over the life of a workload (temporal patterns)
+- `hook('name')` for accessing a parsed body field by name inside hook query args. Requires `parse_body: json` on the hook
 - Math functions: `abs(x)`, `acos(x)`, `asin(x)`, `atan(x)`, `atan2(y,x)`, `ceil(x)`, `cos(x)`, `floor(x)`, `log(x)`, `log10(x)`, `mod(x,y)`, `pow(x,y)`, `sin(x)`, `sqrt(x)`, `tan(x)`, and `pi` constant. Use with `global_iter()` for temporal patterns like drift, seasonality, spikes, and saturation
 
 ### Global sequences
@@ -483,14 +490,16 @@ A complete edg YAML config with all applicable sections:
 
 ### Workers
 - Use the `workers` section for background maintenance queries that run on a fixed schedule alongside the main workload
-- Each worker is a regular query with an added `rate` field
+- Each worker is a regular query with either a `rate` field (recurring) or a `delay` field (one-shot)
 - Rate format is `times/interval` (e.g. `1/10s` = once every 10 seconds, `3/1m` = 3 times per minute)
 - Executions are evenly spaced: `3/1m` fires every 20 seconds
-- Workers support all query fields: `name`, `type`, `args`, `prepared`, `object`, etc.
+- A worker with `delay` instead of `rate` executes once after the specified duration, then stops. Useful for mid-run schema changes or one-shot maintenance
+- A worker must specify either `rate` or `delay`, not both
+- Workers support all query fields: `name`, `type`, `args`, `prepared`, `object`, `ignore`, `request_timeout`, etc.
 - Each worker runs in its own goroutine with its own environment
-- Worker results appear in stats, Prometheus metrics, and expectations
+- Worker results appear in stats, Prometheus metrics, and expectations (unless `ignore: true`)
 - In staged mode, workers run for the entire duration across all stages
-- Example use cases: lease reapers, stats refreshers, cache warmers, periodic cleanup
+- Example use cases: lease reapers, stats refreshers, cache warmers, periodic cleanup, mid-run schema changes
   ```yaml
   workers:
     - name: reap_expired_leases
@@ -505,7 +514,84 @@ A complete edg YAML config with all applicable sections:
       rate: 3/1m
       type: query
       query: SELECT count(*) AS total FROM events
+
+    - name: add_index
+      delay: 30s
+      type: exec
+      query: CREATE INDEX IF NOT EXISTS idx_status ON orders (status)
   ```
+
+### Hooks
+- Use the `hooks` section for event-driven listeners that run alongside the main workload
+- Each hook is a named handler that listens for events (HTTP requests or Kafka messages) and runs queries when events arrive
+- Two hook types: `kafka` (consumer) and `http` (endpoint)
+- Each hook gets its own goroutine and environment (like workers)
+- Hook results appear in stats, Prometheus metrics, and expectations
+- In staged mode, hooks run for the entire duration across all stages
+
+**Body parsing:**
+- `parse_body: json` auto-parses the JSON body into a map. Parsed fields are accessible via `hook('field_name')` in query args
+- `__meta__` is available in query arg expressions for transport metadata:
+  - **Kafka**: `key`, `topic`, `partition`, `offset`, `headers` (map)
+  - **HTTP**: `method`, `path`, `headers` (map)
+
+**Key function:**
+- `hook('name')` - access a parsed body field by name in query args
+
+**YAML example (Kafka):**
+```yaml
+hooks:
+  orders:
+    type: kafka
+    brokers: ["127.0.0.1:9092"]
+    topic: orders
+    group: edg-orders
+    parse_body: json
+    queries:
+      - name: insert_order
+        type: exec
+        args: [hook('order_id'), hook('amount')]
+        query: "INSERT INTO orders (id, amount) VALUES ($1, $2)"
+```
+
+**YAML example (HTTP):**
+```yaml
+hooks:
+  payments:
+    type: http
+    addr: "0.0.0.0:3030"
+    method: POST
+    path: /payments
+    parse_body: json
+    queries:
+      - name: insert_payment
+        type: exec
+        args: [hook('payment_id'), hook('amount')]
+        query: "INSERT INTO payments (id, amount) VALUES ($1, $2)"
+```
+
+**DSL example:**
+```edg
+hooks {
+  orders(type: kafka, brokers: "127.0.0.1:9092", topic: "orders", group: "edg-orders", parse_body: "json") {
+    insert_order `INSERT INTO orders (id, amount) VALUES ($1, $2)`
+      (hook('order_id'), hook('amount'))
+  }
+
+  payments(type: http, addr: "0.0.0.0:3030", method: "POST", path: "/payments", parse_body: "json") {
+    insert_payment `INSERT INTO payments (id, amount) VALUES ($1, $2)`
+      (hook('payment_id'), hook('amount'))
+  }
+}
+```
+
+**Validation requirements:**
+- `type` must be `kafka` or `http`
+- `parse_body` is required (currently only `json` is supported)
+- Kafka hooks require `brokers`, `topic`, and `group`
+- HTTP hooks require `addr`, `method`, and `path`
+- All hooks require at least one query
+- Multiple HTTP hooks each get their own server on different `addr` values
 
 ### Stages
 - Use the `stages` section to define sequential workload phases with different worker counts and durations
@@ -549,6 +635,32 @@ A complete edg YAML config with all applicable sections:
   - **Periodic spikes**: `pow(cos(pi * mod(global_iter(), interval) / interval), 2.0) * scale`
   - **Bounded drift (arctan saturation)**: `base + (2.0 * atan(sqrt(global_iter()) / 100.0) / pi) * max_drift + noise`
 - For periodic patterns, set the period relative to estimated total iterations (e.g., `period = total_iterations / 2` for 2 visible cycles)
+
+### Ignore
+- Setting `ignore: true` on a query, transaction, or worker hides it from progress output, summary table, Prometheus metrics, and expectations
+- The query still executes normally; only stats collection is suppressed
+- When a transaction is ignored, all its inner queries are also ignored
+- Individual queries inside a non-ignored transaction can be ignored independently
+- Use for helper queries whose latency is not meaningful to the benchmark (e.g. setup reads, cache refreshes)
+  ```yaml
+  run:
+    - name: refresh_cache
+      ignore: true
+      type: query
+      query: SELECT id, name FROM product
+  ```
+
+### Request Timeout
+- Setting `request_timeout` on a query applies a per-execution timeout
+- If the query exceeds the deadline, it is cancelled and counted as an error
+- Overrides the global `--request-timeout` CLI flag
+  ```yaml
+  run:
+    - name: fast_lookup
+      request_timeout: 500ms
+      args: [ref_rand('fetch_users').id]
+      query: SELECT * FROM users WHERE id = $1
+  ```
 
 ### Formatting (YAML)
 - Use `|-` for multi-line SQL strings
@@ -1096,6 +1208,7 @@ Do NOT generate configs with these errors:
 | Using `query: \|-` syntax in `.edg` files | DSL uses backticks for SQL, not YAML block scalars | Use `` `SQL here` `` |
 | Missing backticks around SQL in DSL | Parser expects backtick-delimited SQL | Wrap SQL in backticks |
 | Using `name:` / `type:` YAML keys in DSL | DSL infers type from SQL verb; name is a bare identifier | Use DSL syntax: `query_name \`SQL\`` |
+| DSL args `(...)` on a new line after SQL backtick | Parser expects identifier, sees `(` - treats args as a new (invalid) query | Put opening `(` on the same line as the closing backtick: `` \`SQL\` ( `` then args can wrap to next lines |
 
 ## Staging (file output without a database)
 

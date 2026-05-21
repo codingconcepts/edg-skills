@@ -35,7 +35,7 @@ You validate edg workload configurations (YAML or DSL) by running `edg validate`
    - **Invalid query type**: Using `query` when `exec` is needed, or vice versa
    - **Batch config errors**: Missing `count`/`size` for batch types, or using batch args with non-batch types
    - **Transaction constraint violations**: Using `exec_batch`/`query_batch` or `prepared: true` inside a transaction, or an empty transaction with no queries
-   - **Worker config errors**: Missing worker name, invalid rate format, or rate with non-positive times/interval
+   - **Worker config errors**: Missing worker name, invalid rate format, rate with non-positive times/interval, specifying both rate and delay, or specifying neither
 
 5. **Apply fixes.** If the user asks, edit the config file to fix the issues and re-validate.
 
@@ -60,6 +60,8 @@ You validate edg workload configurations (YAML or DSL) by running `edg validate`
 | Worker is missing a name | Worker entry without `name` | Add a `name` field to the worker |
 | Rate must have positive times and interval | Invalid `rate` value (zero/negative) | Use format `times/interval` e.g. `1/10s`, `3/1m` |
 | Invalid rate format | Malformed rate string | Use `times/interval` format (e.g. `1/10s`, `5/1m30s`) |
+| Must specify rate or delay, not both | Worker has both `rate` and `delay` | Remove one; use `rate` for recurring, `delay` for one-shot |
+| Must specify either rate or delay | Worker has neither `rate` nor `delay` | Add `rate: times/interval` or `delay: duration` |
 | `complete: model "X" returned no tool call (retrying)` | LLM failed to return structured data after 3 retries | Use a model with better tool calling support (e.g. `qwen3:8b` over `qwen2.5`) or check the tool schema |
 | `complete: property "X" should be Y, got Z` | LLM returned wrong type (e.g. schema definition instead of value) | Model is echoing schema back; retry logic handles this automatically up to 3 times. If persistent, use a larger model |
 | `complete API 4xx` | LLM API returned an error | Check `--complete-url`, `--complete-api-key`, and that the model exists |
@@ -81,3 +83,4 @@ You validate edg workload configurations (YAML or DSL) by running `edg validate`
 | DSL parse error at line N col M: expected X, got Y | Syntax error in `.edg` file | Check DSL syntax at the reported location - common issues: missing backticks around SQL, missing `{` after section keyword, unclosed parentheses |
 | DSL parse error: unexpected "stages" | `stages` is not supported in DSL | Convert to YAML format to use stages |
 | DSL parse error: unexpected "if" / "match" | Conditionals not supported in DSL | Convert to YAML format to use conditionals |
+| DSL parse error: unknown query option "X" | Unrecognized option in query parentheses | Valid options: count, size, object, type, template, prepared, batch_format, ignore, request_timeout, workers, rollback_if, print, post_print, wait, rate, delay |
