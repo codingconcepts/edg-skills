@@ -1185,6 +1185,63 @@ The `--schema` and `--database` flags are interchangeable. Use `--schema` for dr
 
 The generated config is a starting point, seed expressions will match column types and constraints but won't produce realistic data. The user should refine the config after generation.
 
+## Capturing from real query statistics
+
+If the user wants to generate a workload config that approximates a real production workload, suggest `edg capture`. It reads query statistics from built-in stats views (`pg_stat_statements` for PostgreSQL, `crdb_internal.statement_statistics` for CockroachDB) and produces a config with `run`, `run_weights`, and `stages` sections. Requires a pro license.
+
+```sh
+# CockroachDB
+edg capture \
+  --driver pgx \
+  --flavour cockroachdb \
+  --url "postgres://root@localhost:26257/movr?sslmode=disable" \
+  --name workload
+
+# PostgreSQL (requires pg_stat_statements extension)
+edg capture \
+  --driver pgx \
+  --flavour postgres \
+  --url "postgres://user:pass@localhost:5432/mydb?sslmode=disable" \
+  --name workload
+```
+
+The `--name` flag is required and specifies the output file name without extension. Capture always writes both `<name>.yaml` and `<name>.edg`.
+
+### Capture flags
+
+| Flag | Required | Default | Description |
+|---|---|---|---|
+| `--flavour` | Yes | | Database flavour: `postgres` or `cockroachdb` |
+| `--name` | Yes | | Output file name without extension (writes both `.yaml` and `.edg`) |
+| `--min-calls` | No | `10` | Minimum call count to include a query |
+| `--top` | No | `50` | Maximum number of queries to include |
+| `--duration` | No | `1h` | Assumed observation window for think time calculation |
+| `--workers` | No | `10` | Number of workers in the generated config |
+| `--schema` | No | | Schema or database name to introspect for `up`/`down` DDL |
+| `--database` | No | | Alias for `--schema` |
+
+### Schema introspection with capture
+
+When `--schema` or `--database` is provided, capture also inspects the target schema and adds `up` (CREATE TABLE) and `down` (DROP TABLE IF EXISTS) sections to the output. This uses the same introspection logic as `edg init`, reading the database's own DDL and sorting tables by foreign key dependencies. This produces a self-contained config that can create the schema, run the workload, and tear it down.
+
+```sh
+edg capture \
+  --driver pgx \
+  --flavour cockroachdb \
+  --url "postgres://root@localhost:26257/movr?sslmode=disable" \
+  --schema public \
+  --name workload
+```
+
+Without `--schema`, the output contains only `stages`, `run_weights`, and `run` - suitable for replaying against an existing database.
+
+### Captured config notes
+
+- Query parameters are set to `TODO` placeholders. The user must replace these with appropriate expressions (e.g., `ref_rand('fetch_users').id`).
+- `run_weights` are proportional to observed call counts.
+- Per-query `wait` durations are derived from inter-arrival times.
+- A single `stages` entry is generated matching the observation window and worker count.
+
 ## Common Mistakes
 
 Do NOT generate configs with these errors:
