@@ -479,6 +479,45 @@ A complete edg YAML config with all applicable sections:
           INSERT INTO order_log (customer_id, tax, currency)
           VALUES ($1::UUID, $2::FLOAT, 'EUR')
   ```
+- **Let in branches** - use `let` (DSL) or `locals:` (YAML) inside conditional branches to set variables that persist for the rest of the transaction (or run iteration for standalone). Reduces repetition when branches differ only in a few values:
+  ```yaml
+  # YAML: each branch sets locals, one query references them via local()
+  - if: "ref_same('read_buyer').market == 'uk'"
+    then:
+      - locals:
+          tax_rate: "0.20"
+      - locals:
+          currency: "'GBP'"
+    else:
+      - locals:
+          tax_rate: "0.10"
+      - locals:
+          currency: "'USD'"
+
+  - name: insert_order
+    type: exec
+    args:
+      - ref_same('read_buyer').id
+      - ref_same('read_product').price * local('tax_rate')
+      - local('currency')
+    query: |-
+      INSERT INTO order_log (customer_id, tax, currency)
+      VALUES ($1::UUID, $2::FLOAT, $3::STRING)
+  ```
+  ```edg
+  // DSL equivalent
+  if ref_same('read_buyer').market == 'uk' {
+    let tax_rate = 0.20
+    let currency = 'GBP'
+  } else {
+    let tax_rate = 0.10
+    let currency = 'USD'
+  }
+  insert_order `INSERT INTO order_log ...` (local('tax_rate'), local('currency'))
+  ```
+- Let-in-branches works with both `if/then/else` and `match/when/default`
+- A let-only entry in YAML has `locals:` set but no `name`, `type`, or `query`
+- Branch locals are cleared at the end of the transaction or run iteration
 - Both work inside transactions and as standalone run items (outside transactions)
 - `else` and `default` are optional
 - Special naked entries: `- noop` (do nothing, works anywhere) and `- rollback` (roll back transaction, only inside transactions)
