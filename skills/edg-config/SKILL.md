@@ -85,6 +85,7 @@ edg supports two equivalent config formats. The format is detected by file exten
 | Globals (`let`) | Yes | Yes |
 | Objects with `sub` | Yes | Yes |
 | Reference data (`ref`) | Yes | Yes |
+| CSV data (`csv`) | Yes | No (use `--csv-file`/`--csv-directory`) |
 | All lifecycle sections (up/seed/init/run/deseed/down) | Yes | Yes |
 | Transactions with locals | Yes | Yes |
 | Weights | Yes | Yes |
@@ -106,6 +107,10 @@ edg supports two equivalent config formats. The format is detected by file exten
 ### DSL Syntax Quick Reference
 
 ```edg
+# CSV data (loads as reference datasets)
+csv 'data/regions.csv'
+csv 'data/'
+
 # Globals
 let users = 10000
 let batch_size = 1000
@@ -179,6 +184,7 @@ down { drop_users `DROP TABLE IF EXISTS users` }
 
 ### DSL Rules
 
+- **CSV data** uses `csv 'path'` to load CSV files as reference datasets (file or directory)
 - **SQL uses backticks**, not `query: |-`
 - **Args follow SQL** in parentheses: `` `SELECT ...` (arg1, arg2) ``. The opening `(` must be on the **same line** as the closing backtick - a newline before `(` makes the parser treat it as a new query identifier
 - **Options follow name** in parentheses: `query_name(count: 100, size: 50) \`SQL\``
@@ -280,6 +286,15 @@ A complete edg YAML config with all applicable sections:
   ```
 - `seq_alpha_global("name")` returns the next alpha value. Length N gives 26^N possible values (length 3 = 17,576)
 - `seq_alpha(length)` is the per-worker variant (no config section needed)
+
+### CSV data (edg-lang only)
+- Use `csv 'path/to/file.csv'` or `csv 'path/to/directory/'` to declare CSV dependencies inline
+- Each CSV file becomes a reference dataset named after its filename stem (e.g., `regions.csv` → `ref_same('regions').code`)
+- CSV files must have a header row and at least one data row
+- Paths are relative to the `.edg` file
+- Auto-detects file vs directory
+- Replaces `--csv-file`/`--csv-directory` CLI flags for most use cases
+- Must appear before all declarations (like `include`/`import`)
 
 ### Reference data
 - Use `init` section with `type: query` to fetch data from seeded tables into named datasets
@@ -391,10 +406,11 @@ A complete edg YAML config with all applicable sections:
 - For seed operations with large row counts, use `exec_batch` with `count` (total rows) and `size` (rows per batch)
 - Use `gen_batch(total, batchSize, pattern)` for generating batched values
 - Use `batch(n)` for sequential indices
+- Use `ref_cursor(query, size, cursor_col)` for keyset-paginated iteration over large tables. Pages through results using `WHERE cursor_col > last_value ORDER BY cursor_col LIMIT size`, fetching one page at a time with constant memory. Works with `__values__` for multi-row INSERTs. Ideal when `ref_each()` would load too many rows into memory (e.g. 10M+ rows). Example: `ref_cursor('SELECT id FROM customer ORDER BY id', 1000, 'id')`
 - Use `iter()` for a 1-based row counter within batch queries (resets per query)
 - Use `uniq("expression")` to retry a generator until a unique value is produced (e.g., `uniq("gen('airlineairportiata')")` for unique IATA codes). Defaults to 100 retries; override with `uniq("expression", 500)`
 - For composite uniqueness across columns, pass multiple expressions: `uniq("gen('first_name')", "gen('last_name')")[0]` and `...[1]`. Returns `[]any`; same-row calls with identical expressions return cached tuple
-- **`__values__` token (recommended)**: Use `__values__` in the query to generate a multi-row `VALUES` clause instead of driver-specific batch expansion (`unnest`/`JSON_TABLE`/`OPENJSON`). Produces `VALUES (v1, v2), (v3, v4), ...` - one INSERT per batch. Works with `exec_batch`/`query_batch` and also with `type: exec`/`query` when using batch-expanding args (`gen_batch()`, `batch()`, `ref_each()`). Works with pgx, mysql, mssql, spanner, dsql. For Oracle, use `__values__(table(col1, col2))` to generate `INSERT ALL INTO table (cols) VALUES (...) ... SELECT 1 FROM DUAL`. Does not work with MongoDB or Cassandra. Also supports upsert (`ON CONFLICT`/`ON DUPLICATE KEY`/`MERGE`) and update via CTE
+- **`__values__` token (recommended)**: Use `__values__` in the query to generate a multi-row `VALUES` clause instead of driver-specific batch expansion (`unnest`/`JSON_TABLE`/`OPENJSON`). Produces `VALUES (v1, v2), (v3, v4), ...` - one INSERT per batch. Works with `exec_batch`/`query_batch` and also with `type: exec`/`query` when using batch-expanding args (`gen_batch()`, `batch()`, `ref_each()`, `ref_cursor()`). Works with pgx, mysql, mssql, spanner, dsql. For Oracle, use `__values__(table(col1, col2))` to generate `INSERT ALL INTO table (cols) VALUES (...) ... SELECT 1 FROM DUAL`. Does not work with MongoDB or Cassandra. Also supports upsert (`ON CONFLICT`/`ON DUPLICATE KEY`/`MERGE`) and update via CTE
 
 ### Transactions
 - Group related `run` queries into an explicit `BEGIN/COMMIT` block using the `transaction` key
@@ -634,7 +650,8 @@ hooks {
 
 ### Stages
 - Use the `stages` section to define sequential workload phases with different worker counts and durations
-- Each stage has `name`, `workers`, `duration`, and an optional `run_weights` override
+- Each stage has `name`, `workers`, `duration`, and optional `ramp_duration`, `qps`, and `run_weights` fields
+- `ramp_duration` enables linear ramp-up: for QPS stages, all workers start immediately and QPS increases linearly over the ramp period; for worker-only stages, workers are spawned incrementally. Must be less than `duration`
 - When a stage defines `run_weights`, workers in that stage use those weights instead of the top-level `run_weights`
 - When a stage omits `run_weights`, it falls back to the top-level `run_weights`
 - When neither stage nor top-level has `run_weights`, all run items execute sequentially
@@ -652,6 +669,7 @@ hooks {
     - name: steady
       workers: 10
       duration: 30s
+      ramp_duration: 5s
       # Falls back to top-level run_weights
     - name: cooldown
       workers: 2
@@ -1332,7 +1350,7 @@ edg stage --config <path> --format <format> --output-dir <dir>
 ### Key behaviours
 
 - Batch queries (`exec_batch`) are expanded into individual rows. The batch CSV-joining logic is bypassed
-- Referential integrity is preserved: generated data from earlier queries is stored in memory for `ref_rand`, `ref_each`, `seq_rand`, etc.
+- Referential integrity is preserved: generated data from earlier queries is stored in memory for `ref_rand`, `ref_each`, `ref_cursor`, `seq_rand`, etc.
 - The `--driver` flag still controls SQL value formatting (quote style, hex literals)
 - The `--rng-seed` flag produces deterministic, reproducible output
 - Column names come from: named args > INSERT column list > fallback `col_1`, `col_2`, etc.
