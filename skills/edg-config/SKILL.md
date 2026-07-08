@@ -88,6 +88,7 @@ edg supports two equivalent config formats. The format is detected by file exten
 | CSV data (`csv`) | Yes | No (use `--csv-file`/`--csv-directory`) |
 | All lifecycle sections (up/seed/init/run/deseed/down) | Yes | Yes |
 | Transactions with locals | Yes | Yes |
+| Query-scoped locals | Yes | Yes |
 | Weights | Yes | Yes |
 | Expectations | Yes | Yes |
 | Workers | Yes | Yes |
@@ -151,6 +152,16 @@ init {
 
 run {
   get_user `SELECT * FROM users WHERE id = $1` (ref_rand('load_users').id)
+
+  # Query-scoped locals (between SQL and args)
+  insert_ride(count: 1000, size: 100)
+    `INSERT INTO rides (lat, distance_km) __values__`
+    let city = ref_weighted('data.cities', [556, 278, 139, 27])
+    let dist = lognorm(local('city').dist_mu, local('city').dist_sigma, local('city').dist_min, local('city').dist_max)
+    (
+      lat: uniform(local('city').lat_min, local('city').lat_max),
+      distance_km: local('dist'),
+    )
 
   transaction transfer {
     let amount = gen('number:1,100')
@@ -302,6 +313,7 @@ A complete edg YAML config with all applicable sections:
 - `ref_same('dataset').field` when multiple args need the same row
 - `ref_perm('dataset').field` for worker-pinned rows (e.g., partition affinity)
 - `ref_diff('dataset').field` for unique rows within a single query execution
+- `ref_weighted('dataset', [w1, w2, ...]).field` for weighted random row selection (weights map 1:1 to dataset rows)
 - `ref_n('dataset', 'field', min, max)` for N unique values as comma-separated string
 
 ### Correlated totals
@@ -440,6 +452,36 @@ A complete edg YAML config with all applicable sections:
   ```
 - `rollback_if` must evaluate to a boolean and must not have `name`, `type`, `args`, or `query` fields
 - Local names must not collide with query names in the same transaction
+
+### Query-scoped locals
+- `let` bindings can appear on standalone queries (outside transactions), placed between the SQL template and args
+- Evaluated per row before args; available to subsequent bindings and args via `local('name')`
+- Useful when a `ref_rand`/`ref_weighted` result is needed in multiple args — bind once, access fields:
+  ```edg
+  populate_rides(count: 1000, size: 100)
+    `INSERT INTO rides (pickup_lat, distance_km) __values__`
+    let city = ref_weighted('data.cities', [556, 278, 139, 27])
+    let dist = lognorm(local('city').dist_mu, local('city').dist_sigma, local('city').dist_min, local('city').dist_max)
+    (
+      pickup_lat: uniform(local('city').pickup_lat_min, local('city').pickup_lat_max),
+      distance_km: local('dist'),
+    )
+  ```
+  ```yaml
+  - name: populate_rides
+    count: 1000
+    size: 100
+    locals:
+      city: ref_weighted('data.cities', [556, 278, 139, 27])
+      dist: lognorm(local('city').dist_mu, local('city').dist_sigma, local('city').dist_min, local('city').dist_max)
+    args:
+      - pickup_lat: uniform(local('city').pickup_lat_min, local('city').pickup_lat_max)
+      - distance_km: local('dist')
+    query: INSERT INTO rides (pickup_lat, distance_km) __values__
+  ```
+- Bindings evaluate in declaration order, so later bindings can reference earlier ones
+- Each row gets its own evaluation — `ref_rand`/`ref_weighted` returns a fresh row per data row
+- Ref objects with array properties (e.g. `hour_weights: [2, 1, 1, ...]`) can be accessed via dot notation: `local('city').hour_weights`
 - Conditional rollbacks are not errors, the worker continues to the next iteration
 - Multiple `rollback_if` elements can be placed at different points in the transaction
 - Batch types (`exec_batch`, `query_batch`) cannot be used inside a transaction
