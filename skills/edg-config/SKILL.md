@@ -48,6 +48,7 @@ Match user request features to example directories:
 | Event-driven hooks (HTTP/Kafka) | `hooks/http`, `hooks/kafka` |
 | Staged workloads | `stages/`, `stages_run_weights/` |
 | Temporal patterns | `temporal_patterns/` |
+| Correlated signals | `correlated_signals/` |
 | Interval-aligned timestamps | `timestamp_step/` |
 | Reusable arg templates | `objects/` |
 | Social / relational models | `social/` |
@@ -102,6 +103,7 @@ edg supports two equivalent config formats. The format is detected by file exten
 | Global sequences (`seq:` config) | No | Yes |
 | Print / post_print (inline) | Yes | Yes |
 | Print / post_print (custom agg) | No | Yes |
+| Signals section | Yes | Yes |
 | Expressions section | No | Yes |
 | Complete section (LLM tools) | No | Yes |
 
@@ -123,6 +125,14 @@ object customer {
   sub {
     items = obj_n('item', 1, 5)
   }
+}
+
+# Signals (pre-computed buffers for correlated temporal patterns)
+signal traffic(from: '2024-01-01T00:00:00Z', to: '2024-01-08T00:00:00Z', interval: '5m') {
+  1000 + 400 * sin(2 * pi * i / 288)
+}
+signal promo_boost(length: 2016) {
+  floor(50 * pow(cos(pi * mod(i, 500) / 500), 20))
 }
 
 # Reference data
@@ -209,6 +219,7 @@ down { drop_users `DROP TABLE IF EXISTS users` }
 A complete edg YAML config with all applicable sections:
 - `globals` for shared constants (row counts, batch sizes, worker counts)
 - `expressions` for reusable computed values (optional, only if needed)
+- `signals` for pre-computed temporal signal buffers used across tables (optional, only for correlated temporal patterns)
 - `reference` for static lookup data (optional, only if needed)
 - `seq` for named auto-incrementing sequences shared across all workers (optional, only if integer PKs needed)
 - `up` for schema creation (CREATE TABLE statements)
@@ -260,6 +271,7 @@ A complete edg YAML config with all applicable sections:
 - `timestamp_steps(min, max, interval_or_count)` for the count of evenly spaced timestamps between min and max (use in `count:`); third arg is interval string (`'5m'`) or integer count (`10000`). Sets up state for `timestamp_step()`
 - `date(format, min, max)` for formatted dates
 - `bool()` for random booleans
+- `range(start, end)` / `range(start, end, step)` for generating integer arrays from start to end (both inclusive). Step defaults to 1; use negative step for descending. Useful with `set_rand` to avoid hand-written arrays (e.g., `set_rand(range(0, 23), weights)` instead of `set_rand([0,1,2,...,23], weights)`)
 - `seq(start, step)` for auto-incrementing sequences (per worker)
 - `seq_alpha(length)` for auto-incrementing alpha sequences per worker (aaa, aab, aac, ...)
 - `seq_global("name")` for globally unique sequences shared across all workers (requires `seq:` config section)
@@ -271,7 +283,31 @@ A complete edg YAML config with all applicable sections:
 - `complete_array(tool_name, prompt, count)` for generating N structured items in a single LLM call. Returns `[]map`; use with `ref_each(local(...))` to iterate. Tool schema auto-wrapped in array request. Memoized by (tool, prompt, count). Same config flags and license requirement as `complete()`
 - `global_iter()` for a monotonic iteration counter shared across all workers. Increments with every query execution. Use with math functions and globals to make data change shape over the life of a workload (temporal patterns)
 - `hook('name')` for accessing a parsed body field by name inside hook query args. Requires `parse_body: json` on the hook
+- `signal('name')` for reading a pre-computed signal buffer at the current `iter()`. Define signals in the `signals` config section
+- `signal_at('name', index)` for reading a signal value at a specific index
+- `signal_correlated('name', lag, correlation)` for a correlated value with lag and noise. Lag can be an integer (iterations) or duration string (`'2h'`) if the signal was defined with `from`/`to`/`interval`. Correlation ranges from -1 to 1 (1.0 = exact copy, 0.0 = random noise around signal mean)
 - Math functions: `abs(x)`, `acos(x)`, `asin(x)`, `atan(x)`, `atan2(y,x)`, `ceil(x)`, `cos(x)`, `floor(x)`, `log(x)`, `log10(x)`, `mod(x,y)`, `pow(x,y)`, `sin(x)`, `sqrt(x)`, `tan(x)`, and `pi` constant. Use with `global_iter()` for temporal patterns like drift, seasonality, spikes, and saturation
+
+### Correlated signals
+- Define pre-computed signal buffers in the `signals` section for correlated multi-table temporal patterns:
+  ```yaml
+  signals:
+    traffic:
+      from: '2024-01-01T00:00:00Z'
+      to: '2024-01-08T00:00:00Z'
+      interval: 5m
+      expr: 1000 + 400 * sin(2 * pi * i / 288)
+  ```
+- Use `signal('name')` in args to read the signal at the current iteration
+- Use `signal_correlated('name', lag, correlation)` for correlated values across tables:
+  ```yaml
+  args:
+    - floor(abs(signal_correlated('traffic', 24, 0.3)))
+  ```
+- Lag can be an integer (iterations) or a duration string (`'2h'`) if the signal has an interval
+- Signals can also be defined with explicit length: `length: 1000` instead of from/to/interval
+- Values wrap around when `iter()` exceeds the signal length
+- Wrap correlated outputs in `floor(abs(...))` to avoid negative or fractional values
 
 ### Global sequences
 - When the user needs globally unique integer IDs across concurrent workers, use `seq:` config section with `seq_global("name")`:
