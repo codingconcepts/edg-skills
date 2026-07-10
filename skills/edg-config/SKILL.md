@@ -59,6 +59,7 @@ Match user request features to example directories:
 | Named args | `named_args/` |
 | Print / live stats | `print/` |
 | Sync pairs | `sync/` |
+| Compare benchmarks | `compare/` |
 | Vectors / embeddings | `vector/`, `embed/` |
 | LLM structured generation | `llm/` |
 | Expectations / CI | `expectations/` |
@@ -492,7 +493,7 @@ A complete edg YAML config with all applicable sections:
 ### Query-scoped locals
 - `let` bindings can appear on standalone queries (outside transactions), placed between the SQL template and args
 - Evaluated per row before args; available to subsequent bindings and args via `local('name')`
-- Useful when a `ref_rand`/`ref_weighted` result is needed in multiple args — bind once, access fields:
+- Useful when a `ref_rand`/`ref_weighted` result is needed in multiple args - bind once, access fields:
   ```edg
   populate_rides(count: 1000, size: 100)
     `INSERT INTO rides (pickup_lat, distance_km) __values__`
@@ -516,7 +517,7 @@ A complete edg YAML config with all applicable sections:
     query: INSERT INTO rides (pickup_lat, distance_km) __values__
   ```
 - Bindings evaluate in declaration order, so later bindings can reference earlier ones
-- Each row gets its own evaluation — `ref_rand`/`ref_weighted` returns a fresh row per data row
+- Each row gets its own evaluation - `ref_rand`/`ref_weighted` returns a fresh row per data row
 - Ref objects with array properties (e.g. `hour_weights: [2, 1, 1, ...]`) can be accessed via dot notation: `local('city').hour_weights`
 - Conditional rollbacks are not errors, the worker continues to the next iteration
 - Multiple `rollback_if` elements can be placed at different points in the transaction
@@ -1535,3 +1536,140 @@ Add `--verbose` to `sync verify` to print individual row-level mismatches. Witho
 `sync verify` supports all drivers including MongoDB and Cassandra. For Cassandra, use `127.0.0.1` instead of `localhost` in the URL to avoid IPv6 connection warnings.
 
 For CDC mode (source only, replication handles target), omit `--target-config` from `sync run`.
+
+## Compare Configs (Cross-Database Performance)
+
+When the user wants to benchmark the same workload against two databases side-by-side, generate **paired configs** - one per database driver - for use with `edg compare run`. Note: `edg compare` commands require a license.
+
+### Requirements for compare-compatible configs
+
+- **Matching schemas**: Same table names, column names, and logical types. SQL dialect differs per driver.
+- **Matching seed args**: Both configs should use identical `args` expressions for deterministic seeding with `--rng-seed`.
+- **Include a `run` section**: Unlike sync configs, compare configs must include `run` queries that define the workload to benchmark. Both configs should have the same logical queries adapted for each driver's SQL dialect.
+- **Same query names**: Use identical `name:` values in both configs so the TUI can show side-by-side comparisons per query.
+- **Weight parity**: If using `weight:` on run queries, use the same weights in both configs so the workload mix is comparable.
+- **Use `exec_batch`**: Seed sections should use `type: exec_batch` with `count` and `size` for efficient bulk inserts.
+- **Batch SQL**: Use `__values__` for cross-driver multi-row VALUES clauses.
+
+### Example
+
+For a Postgres + MySQL comparison, generate two files:
+
+**postgres.yaml:**
+```yaml
+globals:
+  user_count: 1000
+  batch_size: 100
+
+up:
+  - name: create_users
+    query: |-
+      CREATE TABLE IF NOT EXISTS users (
+        id INT PRIMARY KEY,
+        email VARCHAR(255) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT NOW()
+      )
+
+seed:
+  - name: seed_users
+    type: exec_batch
+    count: user_count
+    size: batch_size
+    args:
+      - seq(1, 1)
+      - gen('email')
+      - gen('name')
+    query: |-
+      INSERT INTO users (id, email, name)
+      __values__
+
+run:
+  - name: lookup_user
+    type: query
+    args:
+      - uniform_i(1, user_count)
+    query: |-
+      SELECT id, email, name
+      FROM users
+      WHERE id = $1
+
+  - name: insert_user
+    type: exec
+    weight: 20
+    args:
+      - gen('number:100000,999999')
+      - gen('email')
+      - gen('name')
+    query: |-
+      INSERT INTO users (id, email, name)
+      VALUES ($1, $2, $3)
+      ON CONFLICT (id) DO NOTHING
+```
+
+**mysql.yaml:**
+```yaml
+globals:
+  user_count: 1000
+  batch_size: 100
+
+up:
+  - name: create_users
+    query: |-
+      CREATE TABLE IF NOT EXISTS users (
+        id INT PRIMARY KEY,
+        email VARCHAR(255) NOT NULL,
+        name VARCHAR(255) NOT NULL,
+        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+      )
+
+seed:
+  - name: seed_users
+    type: exec_batch
+    count: user_count
+    size: batch_size
+    args:
+      - seq(1, 1)
+      - gen('email')
+      - gen('name')
+    query: |-
+      INSERT INTO users (id, email, name)
+      __values__
+
+run:
+  - name: lookup_user
+    type: query
+    args:
+      - uniform_i(1, user_count)
+    query: |-
+      SELECT id, email, name
+      FROM users
+      WHERE id = ?
+
+  - name: insert_user
+    type: exec
+    weight: 20
+    args:
+      - gen('number:100000,999999')
+      - gen('email')
+      - gen('name')
+    query: |-
+      INSERT INTO users (id, email, name)
+      VALUES (?, ?, ?)
+      ON DUPLICATE KEY UPDATE email = VALUES(email)
+```
+
+### Usage
+
+After generating paired configs, show the user how to run them:
+
+```sh
+edg compare all \
+  --a-driver pgx --a-url "postgres://root:password@localhost:5432/defaultdb?sslmode=disable" --a-config postgres.yaml \
+  --b-driver mysql --b-url "root:password@tcp(localhost:3306)/defaultdb?parseTime=true" --b-config mysql.yaml \
+  --rng-seed 42 -w 4 -d 30s --tui
+```
+
+Or run each phase separately with `edg compare up`, `edg compare seed`, `edg compare run`, `edg compare deseed`, `edg compare down`.
+
+Add `--tui` for an interactive side-by-side TUI with merged tables and overlaid latency graphs. Without `--tui`, results print to stdout with delta percentages at the end.
