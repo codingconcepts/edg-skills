@@ -1,12 +1,12 @@
 ---
 name: edg-config
-description: Generate or modify edg workload configurations (YAML or DSL) from a natural language description of the desired schema and workload.
+description: Generate or modify edg workload configurations (DSL) from a natural language description of the desired schema and workload.
 user-invocable: true
 ---
 
 # edg Config Generator
 
-You are an expert at creating edg (Expression-based Data Generator) workload configurations. When the user describes a database schema and workload, generate a complete, valid edg config file in either YAML or DSL format.
+You are an expert at creating edg (Expression-based Data Generator) workload configurations. When the user describes a database schema and workload, generate a complete, valid edg config file in DSL format (`.edg`).
 
 ## Input
 
@@ -15,15 +15,13 @@ The user will describe:
 - The type of workload (read-heavy, write-heavy, mixed)
 - The target database driver (pgx, mysql, mssql, oracle, dsql, spanner, mongodb, cassandra)
 - Any specific data distribution requirements (hot keys, skewed access, etc.)
-- Optionally, the output format: YAML (`.yaml`) or DSL (`.edg`)
 
 If the user does not specify a driver, default to `pgx`.
-If the user does not specify a format, default to **YAML**. Use **DSL** when the user explicitly requests it (e.g., "use DSL", "generate .edg", "use the new format") or when the workload is simple and query-heavy (no stages, conditionals, or LLM features).
 
 ## Workflow
 
 1. **Read examples.** Before generating, read 1-2 relevant examples from `examples/` that match the target driver and feature complexity (see Example Grounding below).
-2. **Generate.** Write the config to a file (default: `workload.yaml` or `workload.edg` in the working directory, or a user-specified path).
+2. **Generate.** Write the config to a file (default: `workload.edg` in the working directory, or a user-specified path).
 3. **Validate.** Run `edg validate config --config <path>` and read the output.
 4. **Fix and retry.** If validation fails, read the error message, fix the config, and re-validate. Repeat up to 3 times.
 5. **Preview.** After validation passes, suggest staging to preview generated data:
@@ -60,6 +58,7 @@ Match user request features to example directories:
 | Print / live stats | `print/` |
 | Sync pairs | `sync/` |
 | Compare benchmarks | `compare/` |
+| Distributed cluster | `cluster/` |
 | Vectors / embeddings | `vector/`, `embed/` |
 | LLM structured generation | `llm/` |
 | Expectations / CI | `expectations/` |
@@ -67,48 +66,19 @@ Match user request features to example directories:
 
 If the target driver doesn't have an example in that directory, read the `crdb.yaml` version and adapt the SQL dialect.
 
-## Choosing YAML vs DSL
+### DSL Limitations
 
-edg supports two equivalent config formats. The format is detected by file extension: `.edg` → DSL, `.yaml`/`.yml` → YAML.
+The following features are **not available in DSL** and require YAML format (`.yaml`):
+- Stages (sequential workload phases)
+- Conditionals (`if`/`match`)
+- Global sequences (`seq:` config)
+- Print / post_print with custom aggregation
+- Expressions section
+- Complete section (LLM tools)
 
-**Use YAML when:**
-- The workload needs stages, conditionals (`if`/`match`), `print`/`post_print`, `seq:` config, `expressions:` section, or `complete:` tool definitions - these are YAML-only
-- The user doesn't specify a format preference
-- The workload is complex with many options per query
+If the user's workload requires any of these features, inform them that YAML format is needed and generate a `.yaml` file instead.
 
-**Use DSL when:**
-- The user explicitly requests DSL or `.edg` format
-- The workload is query-heavy with simple structure - DSL cuts config size by ~60%
-
-### DSL Feature Support
-
-| Feature | DSL | YAML |
-|---|---|---|
-| Globals (`let`) | Yes | Yes |
-| Objects with `sub` | Yes | Yes |
-| Reference data (`ref`) | Yes | Yes |
-| CSV data (`csv`) | Yes | No (use `--csv-file`/`--csv-directory`) |
-| All lifecycle sections (up/seed/init/run/deseed/down) | Yes | Yes |
-| Transactions with locals | Yes | Yes |
-| Query-scoped locals | Yes | Yes |
-| Weights | Yes | Yes |
-| Expectations | Yes | Yes |
-| Workers | Yes | Yes |
-| Hooks | Yes | Yes |
-| Query options (count, size, object, type, template, prepared, batch_format, ignore, request_timeout, workers, rollback_if, print, post_print) | Yes | Yes |
-| Named and positional args | Yes | Yes |
-| Worker delay (one-shot) | Yes | Yes |
-| Rollback_if (inline) | Yes | Yes |
-| Stages | No | Yes |
-| Conditionals (if/match) | No | Yes |
-| Global sequences (`seq:` config) | No | Yes |
-| Print / post_print (inline) | Yes | Yes |
-| Print / post_print (custom agg) | No | Yes |
-| Signals section | Yes | Yes |
-| Expressions section | No | Yes |
-| Complete section (LLM tools) | No | Yes |
-
-### DSL Syntax Quick Reference
+### Syntax Quick Reference
 
 ```edg
 # CSV data (loads as reference datasets)
@@ -155,6 +125,12 @@ seed {
     `INSERT INTO users (email) __values__`
 
   fetch_users `SELECT id, email FROM users`
+
+  # Junction (many-to-many with cardinality control)
+  # Use ~ as placeholder for FK args, other args are extra columns
+  junction user_roles(left: seed_users, right: seed_roles, left_key: id, right_key: id, min: 1, max: 3)
+    `INSERT INTO user_roles (user_id, role_id) __values__`
+    (user_id: ~, role_id: ~)
 }
 
 init {
@@ -204,7 +180,7 @@ deseed { truncate_users `TRUNCATE TABLE users CASCADE` }
 down { drop_users `DROP TABLE IF EXISTS users` }
 ```
 
-### DSL Rules
+### Syntax Rules
 
 - **CSV data** uses `csv 'path'` to load CSV files as reference datasets (file or directory)
 - **SQL uses backticks**, not `query: |-`
@@ -217,36 +193,37 @@ down { drop_users `DROP TABLE IF EXISTS users` }
 
 ## Output
 
-A complete edg YAML config with all applicable sections:
-- `globals` for shared constants (row counts, batch sizes, worker counts)
-- `expressions` for reusable computed values (optional, only if needed)
-- `signals` for pre-computed temporal signal buffers used across tables (optional, only for correlated temporal patterns)
-- `reference` for static lookup data (optional, only if needed)
-- `seq` for named auto-incrementing sequences shared across all workers (optional, only if integer PKs needed)
+A complete edg DSL config (`.edg`) with all applicable sections:
+- `let` for shared constants (row counts, batch sizes, worker counts)
+- `signal` for pre-computed temporal signal buffers used across tables (optional, only for correlated temporal patterns)
+- `ref` for static lookup data (optional, only if needed)
+- `object` for reusable arg templates (optional, only if needed)
+- `csv` for loading CSV reference datasets (optional)
 - `up` for schema creation (CREATE TABLE statements)
-- `seed` for data population (bulk INSERTs, use `exec_batch` with `count`/`size` for large volumes)
-- `init` for fetching reference data needed by `run` queries (use `type: query` to populate named datasets)
+- `seed` for data population (bulk INSERTs, use `count`/`size` options for large volumes)
+- `init` for fetching reference data needed by `run` queries
 - `run` for the transactional workload (the queries that will be benchmarked)
-- `stages` for staged execution with per-stage worker counts, durations, and optional `run_weights` overrides
-- `run_weights` for weighted query selection (optional, only if multiple run queries; can also be set per-stage)
+- `weights` for weighted query selection (optional, only if multiple run queries)
 - `workers` for background queries that run on a fixed schedule alongside the main workload (optional)
-- `expectations` for CI/CD assertions on benchmark results (optional)
+- `junction` inside `seed` or `run` blocks for many-to-many junction tables with cardinality control (optional)
+- `expect` for CI/CD assertions on benchmark results (optional)
 - `deseed` for data cleanup (TRUNCATE statements)
 - `down` for schema teardown (DROP TABLE statements)
 
 ## Rules
 
 ### Expectations
-- Use `expectations` to assert benchmark results (exit code 1 on failure):
-  ```yaml
-  expectations:
-    - error_rate < 1
-    - tpm > 5000
-    - query_name.p99 < 100
+- Use `expect` to assert benchmark results (exit code 1 on failure):
+  ```edg
+  expect {
+    error_rate < 1
+    tpm > 5000
+    query_name.p99 < 100
+  }
   ```
 - Available metrics: `tpm`, `error_rate`, `query_name.p50`, `query_name.p95`, `query_name.p99`, `query_name.avg`, `query_name.qps`, `query_name.errors`
-- Queries can suppress errors from expectations with `suppress_errors: true`
-- Queries can use `retries: N` for automatic retry on transient errors
+- Queries can suppress errors from expectations with `suppress_errors: true` option
+- Queries can use `retries: N` option for automatic retry on transient errors
 
 ### Query types
 - Use `type: exec` for INSERT, UPDATE, DELETE, TRUNCATE, DROP, CREATE
@@ -267,6 +244,15 @@ A complete edg YAML config with all applicable sections:
 - `zipf(s, v, max)` for hot-key / power-law workloads
 - `pareto(alpha, max)` for continuous power-law distribution (lower values dominate)
 - `exp(rate, min, max)` for exponential distribution
+- `beta(alpha, beta, min, max)` / `beta_f(alpha, beta, min, max, precision)` for Beta distribution (flexible shape: uniform, U-shaped, or bell-shaped)
+- `gamma(shape, rate, min, max)` / `gamma_f(shape, rate, min, max, precision)` for Gamma distribution (right-skewed, models wait times)
+- `weibull(shape, scale, min, max)` / `weibull_f(shape, scale, min, max, precision)` for Weibull distribution (reliability / time-to-failure)
+- `poisson(lambda)` for Poisson distribution (event count in fixed interval)
+- `binomial(n, p)` for Binomial distribution (count of successes in n trials)
+- `empirical(samples)` / `empirical_f(samples, precision)` for sampling from observed data via CDF interpolation
+- `markov(states, matrix)` for stateful Markov chain with transition probabilities (per-worker state)
+- `mvnorm(index, means, stddevs, correlations)` for correlated multivariate normal across columns (per-row caching)
+- `rwalk(drift, volatility)` / `rwalk_f(drift, volatility, precision)` for stateful random walk / Brownian motion (per-worker cumulative)
 - `timestamp(min, max)` for random timestamps
 - `timestamp_step()` for the next monotonic timestamp (requires `timestamp_steps` in `count:`)
 - `timestamp_steps(min, max, interval_or_count)` for the count of evenly spaced timestamps between min and max (use in `count:`); third arg is interval string (`'5m'`) or integer count (`10000`). Sets up state for `timestamp_step()`
@@ -278,9 +264,9 @@ A complete edg YAML config with all applicable sections:
 - `seq_global("name")` for globally unique sequences shared across all workers (requires `seq:` config section)
 - `seq_alpha_global("name")` for globally unique alpha sequences across all workers (requires `seq:` config with `length`)
 - `seq_rand("name")` for uniform random picks from already-generated sequence values
-- `seq_zipf("name", s, v)` / `seq_pareto("name", alpha)` / `seq_norm("name", mean, stddev)` / `seq_exp("name", rate)` / `seq_lognorm("name", mu, sigma)` for distribution-based picks from sequence values
+- `seq_zipf("name", s, v)` / `seq_pareto("name", alpha)` / `seq_norm("name", mean, stddev)` / `seq_exp("name", rate)` / `seq_lognorm("name", mu, sigma)` / `seq_beta("name", alpha, beta)` / `seq_gamma("name", shape, rate)` / `seq_weibull("name", shape, scale)` / `seq_poisson("name", lambda)` / `seq_binomial("name", n, p)` / `seq_empirical("name", samples)` for distribution-based picks from sequence values
 - `embed(text...)` for real vector embeddings via an external API (OpenAI-compatible). Variadic - joins args with space. Requires a license and `--embed-api-key` or `EDG_EMBED_API_KEY`. Configure endpoint with `--embed-url`, model with `--embed-model`, dimensions with `--embed-dimensions`. Use for semantic similarity search with real embeddings instead of synthetic `vector()` clusters
-- `complete(tool_name, prompt)` for LLM-generated structured data via tool calling. Returns a map; access fields with `.field`. Define tools in `complete:` YAML section. Use `locals` to call once per row and access multiple fields. Retries up to 3 times on missing/invalid tool calls, validates response types against schema. 120s per-request timeout. Requires a license and `--complete-api-key` or `EDG_COMPLETE_API_KEY`. Configure endpoint with `--complete-url`, model with `--complete-model`. Any OpenAI-compatible API works (Ollama, vLLM, etc.)
+- `complete(tool_name, prompt)` for LLM-generated structured data via tool calling. Returns a map; access fields with `.field`. Define tools in `complete:` section (YAML-only). Use `locals` to call once per row and access multiple fields. Retries up to 3 times on missing/invalid tool calls, validates response types against schema. 120s per-request timeout. Requires a license and `--complete-api-key` or `EDG_COMPLETE_API_KEY`. Configure endpoint with `--complete-url`, model with `--complete-model`. Any OpenAI-compatible API works (Ollama, vLLM, etc.)
 - `complete_array(tool_name, prompt, count)` for generating N structured items in a single LLM call. Returns `[]map`; use with `ref_each(local(...))` to iterate. Tool schema auto-wrapped in array request. Memoized by (tool, prompt, count). Same config flags and license requirement as `complete()`
 - `global_iter()` for a monotonic iteration counter shared across all workers. Increments with every query execution. Use with math functions and globals to make data change shape over the life of a workload (temporal patterns)
 - `hook('name')` for accessing a parsed body field by name inside hook query args. Requires `parse_body: json` on the hook
@@ -290,20 +276,16 @@ A complete edg YAML config with all applicable sections:
 - Math functions: `abs(x)`, `acos(x)`, `asin(x)`, `atan(x)`, `atan2(y,x)`, `ceil(x)`, `cos(x)`, `floor(x)`, `log(x)`, `log10(x)`, `mod(x,y)`, `pow(x,y)`, `sin(x)`, `sqrt(x)`, `tan(x)`, and `pi` constant. Use with `global_iter()` for temporal patterns like drift, seasonality, spikes, and saturation
 
 ### Correlated signals
-- Define pre-computed signal buffers in the `signals` section for correlated multi-table temporal patterns:
-  ```yaml
-  signals:
-    traffic:
-      from: '2024-01-01T00:00:00Z'
-      to: '2024-01-08T00:00:00Z'
-      interval: 5m
-      expr: 1000 + 400 * sin(2 * pi * i / 288)
+- Define pre-computed signal buffers for correlated multi-table temporal patterns:
+  ```edg
+  signal traffic(from: '2024-01-01T00:00:00Z', to: '2024-01-08T00:00:00Z', interval: '5m') {
+    1000 + 400 * sin(2 * pi * i / 288)
+  }
   ```
 - Use `signal('name')` in args to read the signal at the current iteration
 - Use `signal_correlated('name', lag, correlation)` for correlated values across tables:
-  ```yaml
-  args:
-    - floor(abs(signal_correlated('traffic', 24, 0.3)))
+  ```edg
+  (floor(abs(signal_correlated('traffic', 24, 0.3))))
   ```
 - Lag can be an integer (iterations) or a duration string (`'2h'`) if the signal has an interval
 - Signals can also be defined with explicit length: `length: 1000` instead of from/to/interval
@@ -311,13 +293,7 @@ A complete edg YAML config with all applicable sections:
 - Wrap correlated outputs in `floor(abs(...))` to avoid negative or fractional values
 
 ### Global sequences
-- When the user needs globally unique integer IDs across concurrent workers, use `seq:` config section with `seq_global("name")`:
-  ```yaml
-  seq:
-    - name: order_id
-      start: 1
-      step: 1
-  ```
+- Global sequences (`seq:` config) are a YAML-only feature. If the user needs globally unique integer IDs across concurrent workers, inform them that YAML format is needed
 - `seq_global("name")` in args returns the next value from the named sequence
 - Unlike `seq(start, step)` which is per-worker, `seq_global` is shared across all workers
 - Sequence counter continues across seed and run phases
@@ -326,14 +302,9 @@ A complete edg YAML config with all applicable sections:
 - These compute valid values from `start + index * step` (no values stored in memory, works with any step)
 
 ### Alpha sequences
-- For globally unique alpha codes (aaa, aab, aac, ...) across workers, use `seq:` with `length`:
-  ```yaml
-  seq:
-    - name: sku_code
-      length: 3
-  ```
-- `seq_alpha_global("name")` returns the next alpha value. Length N gives 26^N possible values (length 3 = 17,576)
-- `seq_alpha(length)` is the per-worker variant (no config section needed)
+- `seq_alpha(length)` generates per-worker auto-incrementing alpha sequences (aaa, aab, aac, ...)
+- Global alpha sequences (`seq_alpha_global("name")`) require `seq:` config which is YAML-only
+- Length N gives 26^N possible values (length 3 = 17,576)
 
 ### CSV data (edg-lang only)
 - Use `csv 'path/to/file.csv'` or `csv 'path/to/directory/'` to declare CSV dependencies inline
@@ -352,6 +323,8 @@ A complete edg YAML config with all applicable sections:
 - `ref_diff('dataset').field` for unique rows within a single query execution
 - `ref_weighted('dataset', [w1, w2, ...]).field` for weighted random row selection (weights map 1:1 to dataset rows)
 - `ref_n('dataset', 'field', min, max)` for N unique values as comma-separated string
+- Distribution-based ref functions pick rows using statistical distributions: `ref_zipf(name, s, v)`, `ref_pareto(name, alpha)`, `ref_norm(name, mean, stddev)`, `ref_exp(name, rate)`, `ref_lognorm(name, mu, sigma)`, `ref_beta(name, alpha, beta)`, `ref_gamma(name, shape, rate)`, `ref_weibull(name, shape, scale)`, `ref_poisson(name, lambda)`, `ref_binomial(name, n, p)`, `ref_empirical(name, samples)`
+- Distribution-based set functions pick from a predefined array: `set_rand(values, weights)`, `set_zipf(values, s, v)`, `set_pareto(values, alpha)`, `set_norm(values, mean, stddev)`, `set_exp(values, rate)`, `set_lognorm(values, mu, sigma)`, `set_beta(values, alpha, beta)`, `set_gamma(values, shape, rate)`, `set_weibull(values, shape, scale)`, `set_poisson(values, lambda)`, `set_binomial(values, n, p)`, `set_empirical(values, samples)`
 
 ### Correlated totals
 - `distribute_sum(total, minN, maxN, precision)` partitions a total into N random parts (comma-separated) that sum exactly to it. Use SQL `unnest`/`string_to_array` (pgx) or `JSON_TABLE` (MySQL) to expand into rows
@@ -378,77 +351,64 @@ A complete edg YAML config with all applicable sections:
 
 ### Named args
 - Args can be a map instead of a list, giving each arg a name:
-  ```yaml
-  args:
-    email: gen('email')
-    region: ref_same('regions').name
-    amount: uniform(1, 500)
-    label: arg('email') + " (" + arg('region') + ")"
+  ```edg
+  insert_user `INSERT INTO users (email, region, amount, label) VALUES ($1, $2, $3, $4)`
+    (
+      email: gen('email'),
+      region: ref_same('regions').name,
+      amount: uniform(1, 500),
+      label: arg('email') + " (" + arg('region') + ")",
+    )
   ```
 - Named args bind to `$1`, `$2`, etc. in declaration order
 - Index-based `arg(0)` still works with named args
 - Named and positional forms are mutually exclusive per query
 
 ### Objects (reusable arg templates)
-- Define named arg templates in the `objects` section. Each object is a map of field names to expressions:
-  ```yaml
-  objects:
-    order:
-      email: gen('email')
-      product: gen('productname')
-      quantity: int(uniform(1, 100))
-      ordered_at: timestamp('2024-01-01T00:00:00Z', '2025-01-01T00:00:00Z')
+- Define named arg templates with `object`:
+  ```edg
+  object order {
+    email = gen('email')
+    product = gen('productname')
+    quantity = int(uniform(1, 100))
+    ordered_at = timestamp('2024-01-01T00:00:00Z', '2025-01-01T00:00:00Z')
+  }
   ```
-- **`object: object_name`** expands all fields as positional args in declaration order:
-  ```yaml
-  - name: insert_order
-    type: exec
-    object: order
-    query: INSERT INTO "order" (email, product, quantity, ordered_at) VALUES ($1, $2, $3, $4)
+- **`object:` option** expands all fields as positional args in declaration order:
+  ```edg
+  insert_order(object: order)
+    `INSERT INTO "order" (email, product, quantity, ordered_at) VALUES ($1, $2, $3, $4)`
   ```
 - **`field('name')`** cherry-picks fields when `object:` is set (mixable with other expressions):
-  ```yaml
-  object: order
-  args:
-    - field('email')
-    - field('product')
+  ```edg
+  insert_order(object: order)
+    `INSERT INTO "order" (email, product) VALUES ($1, $2)`
+    (field('email'), field('product'))
   ```
 - **`obj('name', 'field')`** accesses a specific field without `object:`:
-  ```yaml
-  args:
-    - obj('order', 'email')
-    - obj('order', 'product')
+  ```edg
+  insert_order `INSERT INTO "order" (email, product) VALUES ($1, $2)`
+    (obj('order', 'email'), obj('order', 'product'))
   ```
 - **`obj('name').field`** evaluates all fields, accesses via dot notation (cached per query execution):
-  ```yaml
-  args:
-    - obj('order').email
-    - obj('order').product
+  ```edg
+  insert_order `INSERT INTO "order" (email, product) VALUES ($1, $2)`
+    (obj('order').email, obj('order').product)
   ```
-- `object:` works with `exec_batch` + `__values__` for bulk inserts using an object template
+- `object:` works with batch inserts + `__values__` for bulk inserts using an object template
 
 ### Print (live aggregated stats)
-- The `print` field evaluates expressions each iteration and displays aggregated values:
-  ```yaml
-  print:
-    # Simple form (auto-aggregated: frequency for strings, min/avg/max for numbers)
-    - ref_same('regions').name
-    - arg('amount')
-
-    # Custom aggregation with expr + agg
-    - expr: arg('amount')
-      agg: "'avg $' + string(int(avg)) + ' n=' + string(count)"
+- The `print` option evaluates expressions each iteration and displays aggregated values:
+  ```edg
+  get_user(print: ref_same('regions').name)
+    `SELECT * FROM users WHERE region = $1`
+    (ref_same('regions').name)
   ```
 - Print expressions have access to the same context as args: `ref_same`, `ref_rand`, `arg()`, `global()`, `local()`
-- Custom `agg` expressions can use: `count`, `freq`, `min`, `max`, `avg`, `sum`
+- Custom `agg` expressions (custom aggregation) are YAML-only
 - Only applies to `run` section queries
-- The `post_print` field works like `print` but evaluates **after** query execution, giving access to `result()`:
-  ```yaml
-  post_print:
-    - expr: result().total
-      agg: "string(int(min)) + '..' + string(int(max))"
-  ```
-- `result()` returns the first row of a `type: query` SELECT result as a map (e.g. `result().column_name`)
+- The `post_print` option works like `print` but evaluates **after** query execution, giving access to `result()`
+- `result()` returns the first row of a SELECT result as a map (e.g. `result().column_name`)
 - Use `post_print` when you need to observe query output (balances, counts, totals) in progress output
 
 ### Batch operations
@@ -462,32 +422,26 @@ A complete edg YAML config with all applicable sections:
 - **`__values__` token (recommended)**: Use `__values__` in the query to generate a multi-row `VALUES` clause instead of driver-specific batch expansion (`unnest`/`JSON_TABLE`/`OPENJSON`). Produces `VALUES (v1, v2), (v3, v4), ...` - one INSERT per batch. Works with `exec_batch`/`query_batch` and also with `type: exec`/`query` when using batch-expanding args (`gen_batch()`, `batch()`, `ref_each()`, `ref_cursor()`). Works with pgx, mysql, mssql, spanner, dsql. For Oracle, use `__values__(table(col1, col2))` to generate `INSERT ALL INTO table (cols) VALUES (...) ... SELECT 1 FROM DUAL`. Does not work with MongoDB or Cassandra. Also supports upsert (`ON CONFLICT`/`ON DUPLICATE KEY`/`MERGE`) and update via CTE
 
 ### Transactions
-- Group related `run` queries into an explicit `BEGIN/COMMIT` block using the `transaction` key
-- Use `locals` to define transaction-scoped variables evaluated once at transaction start, accessible via `local('name')`:
-  ```yaml
-  run:
-    - transaction: make_transfer
-      locals:
-        amount: gen('number:1,100')
-      queries:
-        - name: read_source
-          type: query
-          args: [ref_diff('fetch_accounts').id]
-          query: SELECT id, balance FROM account WHERE id = $1
-        - name: debit_source
-          type: exec
-          args: [ref_same('read_source').id, local('amount')]
-          query: UPDATE accounts SET balance = balance - $2 WHERE id = $1
-        - name: credit_target
-          type: exec
-          args: [ref_same('fetch_accounts').id, local('amount')]
-          query: UPDATE accounts SET balance = balance + $2 WHERE id = $1
+- Group related `run` queries into an explicit `BEGIN/COMMIT` block using `transaction`:
+  ```edg
+  run {
+    transaction transfer {
+      let amount = gen('number:1,100')
+      read_source `SELECT id, balance FROM account WHERE id = $1`
+        (ref_diff('fetch_accounts').id)
+      debit_source `UPDATE accounts SET balance = balance - $2 WHERE id = $1`
+        (ref_same('read_source').id, local('amount'))
+      credit_target `UPDATE accounts SET balance = balance + $2 WHERE id = $1`
+        (ref_same('fetch_accounts').id, local('amount'))
+    }
+  }
   ```
-- Use `rollback_if` elements between queries for conditional early rollback:
-  ```yaml
-  - rollback_if: "ref_same('read_source').balance < local('amount')"
+- Use `let` inside transactions for scoped variables evaluated once at transaction start, accessible via `local('name')`
+- Use `rollback_if` between queries for conditional early rollback:
+  ```edg
+  rollback_if ref_same('read_source').balance < local('amount')
   ```
-- `rollback_if` must evaluate to a boolean and must not have `name`, `type`, `args`, or `query` fields
+- `rollback_if` must evaluate to a boolean
 - Local names must not collide with query names in the same transaction
 
 ### Query-scoped locals
@@ -504,18 +458,6 @@ A complete edg YAML config with all applicable sections:
       distance_km: local('dist'),
     )
   ```
-  ```yaml
-  - name: populate_rides
-    count: 1000
-    size: 100
-    locals:
-      city: ref_weighted('data.cities', [556, 278, 139, 27])
-      dist: lognorm(local('city').dist_mu, local('city').dist_sigma, local('city').dist_min, local('city').dist_max)
-    args:
-      - pickup_lat: uniform(local('city').pickup_lat_min, local('city').pickup_lat_max)
-      - distance_km: local('dist')
-    query: INSERT INTO rides (pickup_lat, distance_km) __values__
-  ```
 - Bindings evaluate in declaration order, so later bindings can reference earlier ones
 - Each row gets its own evaluation - `ref_rand`/`ref_weighted` returns a fresh row per data row
 - Ref objects with array properties (e.g. `hour_weights: [2, 1, 1, ...]`) can be accessed via dot notation: `local('city').hour_weights`
@@ -527,80 +469,12 @@ A complete edg YAML config with all applicable sections:
 - Use `run_weights` to weight transactions against standalone queries (reference by transaction name)
 
 ### Conditionals (if/then/else and match/when/default)
-- Use `if/then/else` for binary branching based on a boolean expression:
-  ```yaml
-  # Inside a transaction
-  - if: "ref_same('read_buyer').market == 'uk'"
-    then:
-      - name: insert_uk_order
-        type: exec
-        args: [ref_same('read_buyer').id, ref_same('read_product').price * 0.20]
-        query: |-
-          INSERT INTO order_log (customer_id, tax, currency)
-          VALUES ($1::UUID, $2::FLOAT, 'GBP')
-    else:
-      - name: insert_other_order
-        type: exec
-        args: [ref_same('read_buyer').id, ref_same('read_product').price * 0.10]
-        query: |-
-          INSERT INTO order_log (customer_id, tax, currency)
-          VALUES ($1::UUID, $2::FLOAT, 'USD')
-  ```
-- Use `match/when/default` for multi-way dispatch:
-  ```yaml
-  - match: "ref_same('read_buyer').market"
-    when:
-      - eq: "'uk'"
-        queries:
-          - name: insert_uk_order
-            type: exec
-            args: [ref_same('read_buyer').id, ref_same('read_product').price * 0.20]
-            query: |-
-              INSERT INTO order_log (customer_id, tax, currency)
-              VALUES ($1::UUID, $2::FLOAT, 'GBP')
-      - eq: "'us'"
-        queries:
-          - name: insert_us_order
-            type: exec
-            args: [ref_same('read_buyer').id, ref_same('read_product').price * 0.10]
-            query: |-
-              INSERT INTO order_log (customer_id, tax, currency)
-              VALUES ($1::UUID, $2::FLOAT, 'USD')
-    default:
-      - name: insert_eu_order
-        type: exec
-        args: [ref_same('read_buyer').id, ref_same('read_product').price * 0.23]
-        query: |-
-          INSERT INTO order_log (customer_id, tax, currency)
-          VALUES ($1::UUID, $2::FLOAT, 'EUR')
-  ```
-- **Let in branches** - use `let` (DSL) or `locals:` (YAML) inside conditional branches to set variables that persist for the rest of the transaction (or run iteration for standalone). Reduces repetition when branches differ only in a few values:
-  ```yaml
-  # YAML: each branch sets locals, one query references them via local()
-  - if: "ref_same('read_buyer').market == 'uk'"
-    then:
-      - locals:
-          tax_rate: "0.20"
-      - locals:
-          currency: "'GBP'"
-    else:
-      - locals:
-          tax_rate: "0.10"
-      - locals:
-          currency: "'USD'"
+Conditionals are a **YAML-only feature**. If the user's workload requires conditional branching, inform them that YAML format is needed.
 
-  - name: insert_order
-    type: exec
-    args:
-      - ref_same('read_buyer').id
-      - ref_same('read_product').price * local('tax_rate')
-      - local('currency')
-    query: |-
-      INSERT INTO order_log (customer_id, tax, currency)
-      VALUES ($1::UUID, $2::FLOAT, $3::STRING)
-  ```
+- `if/then/else` for binary branching based on a boolean expression
+- `match/when/default` for multi-way dispatch
+- **Let in branches** - use `let` inside conditional branches to set variables that persist for the rest of the transaction. DSL syntax:
   ```edg
-  // DSL equivalent
   if ref_same('read_buyer').market == 'uk' {
     let tax_rate = 0.20
     let currency = 'GBP'
@@ -608,51 +482,40 @@ A complete edg YAML config with all applicable sections:
     let tax_rate = 0.10
     let currency = 'USD'
   }
-  insert_order `INSERT INTO order_log ...` (local('tax_rate'), local('currency'))
+  insert_order `INSERT INTO order_log (customer_id, tax, currency)
+    VALUES ($1::UUID, $2::FLOAT, $3::STRING)` (local('tax_rate'), local('currency'))
   ```
-- Let-in-branches works with both `if/then/else` and `match/when/default`
-- A let-only entry in YAML has `locals:` set but no `name`, `type`, or `query`
 - Branch locals are cleared at the end of the transaction or run iteration
-- Both work inside transactions and as standalone run items (outside transactions)
+- Both work inside transactions and as standalone run items
 - `else` and `default` are optional
-- Special naked entries: `- noop` (do nothing, works anywhere) and `- rollback` (roll back transaction, only inside transactions)
-- Conditionals can be nested (if/match inside then/else/when/default branches)
+- Special naked entries: `noop` (do nothing) and `rollback` (roll back transaction, only inside transactions)
+- Conditionals can be nested
 - The `if` condition must evaluate to boolean; `match` and `eq` values are compared as strings
-- Conditional entries must not have `name`, `type`, `args`, or `query` fields
-- Standalone conditionals cannot be used with `run_weights`
+- Standalone conditionals cannot be used with `weights`
 - Example files: `examples/conditional_if/`, `examples/conditional_match/`
 
 ### Workers
 - Use the `workers` section for background maintenance queries that run on a fixed schedule alongside the main workload
-- Each worker is a regular query with either a `rate` field (recurring) or a `delay` field (one-shot)
+- Each worker is a regular query with either a `rate` option (recurring) or a `delay` option (one-shot)
 - Rate format is `times/interval` (e.g. `1/10s` = once every 10 seconds, `3/1m` = 3 times per minute)
 - Executions are evenly spaced: `3/1m` fires every 20 seconds
 - A worker with `delay` instead of `rate` executes once after the specified duration, then stops. Useful for mid-run schema changes or one-shot maintenance
 - A worker must specify either `rate` or `delay`, not both
-- Workers support all query fields: `name`, `type`, `args`, `prepared`, `object`, `ignore`, `request_timeout`, etc.
+- Workers support all query options: `type`, `args`, `prepared`, `object`, `ignore`, `request_timeout`, etc.
 - Each worker runs in its own goroutine with its own environment
 - Worker results appear in stats, Prometheus metrics, and expectations (unless `ignore: true`)
 - In staged mode, workers run for the entire duration across all stages
 - Example use cases: lease reapers, stats refreshers, cache warmers, periodic cleanup, mid-run schema changes
-  ```yaml
-  workers:
-    - name: reap_expired_leases
-      rate: 1/5s
-      type: exec
-      query: |-
-        UPDATE runs
-        SET status = 'pending', worker_id = NULL
-        WHERE status = 'claimed' AND lease_expires_at < now()
+  ```edg
+  workers {
+    reap_expired_leases(rate: 1/5s) `UPDATE runs
+      SET status = 'pending', worker_id = NULL
+      WHERE status = 'claimed' AND lease_expires_at < now()`
 
-    - name: refresh_counts
-      rate: 3/1m
-      type: query
-      query: SELECT count(*) AS total FROM events
+    refresh_counts(rate: 3/1m) `SELECT count(*) AS total FROM events`
 
-    - name: add_index
-      delay: 30s
-      type: exec
-      query: CREATE INDEX IF NOT EXISTS idx_status ON orders (status)
+    add_index(delay: 30s) `CREATE INDEX IF NOT EXISTS idx_status ON orders (status)`
+  }
   ```
 
 ### Hooks
@@ -664,7 +527,7 @@ A complete edg YAML config with all applicable sections:
 - In staged mode, hooks run for the entire duration across all stages
 
 **Body parsing:**
-- `parse_body: json` auto-parses the JSON body into a map. Parsed fields are accessible via `hook('field_name')` in query args
+- `parse_body: "json"` auto-parses the JSON body into a map. Parsed fields are accessible via `hook('field_name')` in query args
 - `__meta__` is available in query arg expressions for transport metadata:
   - **Kafka**: `key`, `topic`, `partition`, `offset`, `headers` (map)
   - **HTTP**: `method`, `path`, `headers` (map)
@@ -672,39 +535,7 @@ A complete edg YAML config with all applicable sections:
 **Key function:**
 - `hook('name')` - access a parsed body field by name in query args
 
-**YAML example (Kafka):**
-```yaml
-hooks:
-  orders:
-    type: kafka
-    brokers: ["127.0.0.1:9092"]
-    topic: orders
-    group: edg-orders
-    parse_body: json
-    queries:
-      - name: insert_order
-        type: exec
-        args: [hook('order_id'), hook('amount')]
-        query: "INSERT INTO orders (id, amount) VALUES ($1, $2)"
-```
-
-**YAML example (HTTP):**
-```yaml
-hooks:
-  payments:
-    type: http
-    addr: "0.0.0.0:3030"
-    method: POST
-    path: /payments
-    parse_body: json
-    queries:
-      - name: insert_payment
-        type: exec
-        args: [hook('payment_id'), hook('amount')]
-        query: "INSERT INTO payments (id, amount) VALUES ($1, $2)"
-```
-
-**DSL example:**
+**Example:**
 ```edg
 hooks {
   orders(type: kafka, brokers: "127.0.0.1:9092", topic: "orders", group: "edg-orders", parse_body: "json") {
@@ -728,37 +559,14 @@ hooks {
 - Multiple HTTP hooks each get their own server on different `addr` values
 
 ### Stages
-- Use the `stages` section to define sequential workload phases with different worker counts and durations
+Stages are a **YAML-only feature**. If the user's workload requires staged execution, inform them that YAML format is needed.
+
+- Define sequential workload phases with different worker counts and durations
 - Each stage has `name`, `workers`, `duration`, and optional `ramp_duration`, `qps`, and `run_weights` fields
 - `ramp_duration` enables linear ramp-up: for QPS stages, all workers start immediately and QPS increases linearly over the ramp period; for worker-only stages, workers are spawned incrementally. Must be less than `duration`
 - When a stage defines `run_weights`, workers in that stage use those weights instead of the top-level `run_weights`
-- When a stage omits `run_weights`, it falls back to the top-level `run_weights`
-- When neither stage nor top-level has `run_weights`, all run items execute sequentially
 - Workers (background queries) run for the entire duration across all stages, unaffected by per-stage weights
 - When `stages` is defined, the `-w` and `-d` CLI flags are ignored
-  ```yaml
-  stages:
-    - name: ramp
-      workers: 1
-      duration: 10s
-      run_weights:
-        check_balance: 90
-        credit_account: 5
-        make_transfer: 5
-    - name: steady
-      workers: 10
-      duration: 30s
-      ramp_duration: 5s
-      # Falls back to top-level run_weights
-    - name: cooldown
-      workers: 2
-      duration: 10s
-
-  run_weights:
-    check_balance: 50
-    credit_account: 5
-    make_transfer: 45
-  ```
 
 ### Temporal patterns
 - Use `global_iter()` with math functions and globals to make generated data change shape over a workload's lifetime
@@ -778,151 +586,31 @@ hooks {
 - When a transaction is ignored, all its inner queries are also ignored
 - Individual queries inside a non-ignored transaction can be ignored independently
 - Use for helper queries whose latency is not meaningful to the benchmark (e.g. setup reads, cache refreshes)
-  ```yaml
-  run:
-    - name: refresh_cache
-      ignore: true
-      type: query
-      query: SELECT id, name FROM product
+  ```edg
+  run {
+    refresh_cache(ignore: true) `SELECT id, name FROM product`
+  }
   ```
 
 ### Request Timeout
 - Setting `request_timeout` on a query applies a per-execution timeout
 - If the query exceeds the deadline, it is cancelled and counted as an error
 - Overrides the global `--request-timeout` CLI flag
-  ```yaml
-  run:
-    - name: fast_lookup
-      request_timeout: 500ms
-      args: [ref_rand('fetch_users').id]
-      query: SELECT * FROM users WHERE id = $1
+  ```edg
+  run {
+    fast_lookup(request_timeout: 500ms)
+      `SELECT * FROM users WHERE id = $1`
+      (ref_rand('fetch_users').id)
+  }
   ```
 
-### Formatting (YAML)
-- Use `|-` for multi-line SQL strings
-- Use `>-` for single-line SQL that wraps for readability
-- Group related queries with YAML comments
-- Name every query descriptively (e.g., `create_users`, `seed_orders`, `fetch_user_by_id`)
-
-### Formatting (DSL)
+### Formatting
 - SQL goes in backticks - no indentation concerns
 - Single-line sections are fine: `deseed { truncate_users \`TRUNCATE TABLE users CASCADE\` }`
 - Use `#` for comments
 - Name every query descriptively
 
-## YAML Example
-
-```yaml
-globals:
-  users: 10000
-  orders: 50000
-  batch_size: 1000
-
-up:
-
-  - name: create_users
-    query: |-
-      CREATE TABLE IF NOT EXISTS users (
-        id UUID PRIMARY KEY,
-        email VARCHAR(255) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT now()
-      )
-
-  - name: create_orders
-    query: |-
-      CREATE TABLE IF NOT EXISTS orders (
-        id UUID PRIMARY KEY,
-        user_id UUID NOT NULL REFERENCES users(id),
-        total DECIMAL(10,2) NOT NULL,
-        status VARCHAR(20) NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT now()
-      )
-
-seed:
-
-  - name: seed_users
-    type: exec_batch
-    count: users
-    size: batch_size
-    args:
-      - uuid_v7()
-      - gen('email')
-      - gen('firstname') + ' ' + gen('lastname')
-    query: |-
-      INSERT INTO users (id, email, name)
-      __values__
-
-  - name: seed_orders
-    type: exec_batch
-    count: orders
-    size: batch_size
-    args:
-      - uuid_v7()
-      - ref_rand('fetch_users').id
-      - uniform_f(5.00, 500.00, 2)
-      - set_rand(['pending', 'shipped', 'delivered', 'cancelled'], [40, 30, 25, 5])
-    query: |-
-      INSERT INTO orders (id, user_id, total, status)
-      __values__
-
-init:
-
-  - name: fetch_users
-    type: query
-    query: SELECT id, email FROM users
-
-run:
-
-  - name: get_user_orders
-    type: query
-    args:
-      - ref_rand('fetch_users').id
-    query: |-
-      SELECT id, total, status, created_at
-      FROM orders
-      WHERE user_id = $1
-      ORDER BY created_at DESC
-      LIMIT 10
-
-  - name: place_order
-    type: exec
-    args:
-      - uuid_v7()
-      - ref_rand('fetch_users').id
-      - uniform_f(5.00, 500.00, 2)
-    query: |-
-      INSERT INTO orders (id, user_id, total, status)
-      VALUES ($1, $2, $3, 'pending')
-
-run_weights:
-  get_user_orders: 70
-  place_order: 30
-
-deseed:
-
-  - name: truncate_orders
-    type: exec
-    query: TRUNCATE TABLE orders
-
-  - name: truncate_users
-    type: exec
-    query: TRUNCATE TABLE users
-
-down:
-
-  - name: drop_orders
-    type: exec
-    query: DROP TABLE IF EXISTS orders
-
-  - name: drop_users
-    type: exec
-    query: DROP TABLE IF EXISTS users
-```
-
-## DSL Example
-
-The same workload in DSL format (~60% smaller):
+## Example
 
 ```edg
 let users = 10000
@@ -1010,22 +698,19 @@ Apply these patterns based on the target driver.
 - **Vector columns**: Use `VECTOR(n)` type and `vector(dims, clusters, spread)` expression for synthetic clustered vectors, or `embed(text...)` for real embeddings from an external API. `embed()` requires a license and `--embed-api-key`; dimensions must match the `VECTOR(n)` column type and `--embed-dimensions` flag. Use `--embed-max-batch` to limit texts per API call in batch queries
 - **Batch expansion (unnest)**: Use `unnest(string_to_array('$1', __sep__))` to expand batch args into rows. `__sep__` is a query-text token that emits the correct SQL separator function for the target driver (`chr(31)` for pgx, `CHAR(31)` for MySQL/MSSQL, `codepoints-to-string(31)` for Oracle, `CODE_POINTS_TO_STRING([31])` for Spanner)
 - **Batch expansion (__values__)**: Use `__values__` to generate a multi-row VALUES clause. Simpler than unnest and produces one INSERT per batch:
-  ```yaml
-  query: |-
-    INSERT INTO t (name, email) __values__
+  ```sql
+  INSERT INTO t (name, email) __values__
   ```
 - **Batch upsert (__values__)**: Combine `__values__` with `ON CONFLICT`:
-  ```yaml
-  query: |-
-    INSERT INTO t (name, price) __values__
-    ON CONFLICT (name) DO UPDATE SET price = EXCLUDED.price
+  ```sql
+  INSERT INTO t (name, price) __values__
+  ON CONFLICT (name) DO UPDATE SET price = EXCLUDED.price
   ```
 - **Batch update (__values__)**: Use a CTE with `__values__`:
-  ```yaml
-  query: |-
-    UPDATE t SET price = v.price
-    FROM (__values__) AS v(id, price)
-    WHERE t.id = v.id::UUID
+  ```sql
+  UPDATE t SET price = v.price
+  FROM (__values__) AS v(id, price)
+  WHERE t.id = v.id::UUID
   ```
 - **Upsert**: `ON CONFLICT (col) DO UPDATE SET ...`
 - **Pagination**: `LIMIT $1 OFFSET $2`
@@ -1052,9 +737,8 @@ Apply these patterns based on the target driver.
   ) j
   ```
 - **Batch expansion (__values__)**: Use `__values__` for simpler multi-row VALUES:
-  ```yaml
-  query: |-
-    INSERT INTO t (name, email) __values__
+  ```sql
+  INSERT INTO t (name, email) __values__
   ```
 - **Upsert**: `ON DUPLICATE KEY UPDATE col = VALUES(col)`
 - **Categorical selection**: Use `ELT(index, 'val1', 'val2', ...)` instead of array indexing
@@ -1077,9 +761,8 @@ Apply these patterns based on the target driver.
   SELECT value FROM OPENJSON('$1')
   ```
 - **Batch expansion (__values__)**: Use `__values__` for simpler multi-row VALUES (max 1000 rows per INSERT):
-  ```yaml
-  query: |-
-    INSERT INTO t (name, email) __values__
+  ```sql
+  INSERT INTO t (name, email) __values__
   ```
 - **Upsert**: Use `MERGE INTO ... USING ... ON ... WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ...`
 - **DDL safety**: Wrap in existence check:
@@ -1104,8 +787,8 @@ Apply these patterns based on the target driver.
   SELECT column_value FROM XMLTABLE(('"' || REPLACE('$1', __sep__, '","') || '"'))
   ```
 - **Batch expansion (__values__)**: Use `__values__(table(col1, col2))` for Oracle `INSERT ALL`:
-  ```yaml
-  query: INSERT ALL __values__(product(name, price))
+  ```sql
+  INSERT ALL __values__(product(name, price))
   ```
   Generates: `INTO product (name, price) VALUES (...)\nINTO product ... \nSELECT 1 FROM DUAL`
 - **Upsert**: Use `MERGE INTO ... USING (SELECT :1 AS col FROM DUAL) src ON ... WHEN MATCHED THEN UPDATE ... WHEN NOT MATCHED THEN INSERT ...`
@@ -1162,7 +845,7 @@ MongoDB uses BSON/JSON command syntax instead of SQL. Queries are JSON objects s
 - **Batch inserts**: Use `exec_batch` with `count`/`size`; each batch inserts one document per execution
 - **Reference data**: Use `{"find": "collection", "filter": {}}` in `seed` or `init` with `type: query` to populate datasets
 - **ObjectIDs**: Use `objectid()` to generate MongoDB ObjectIDs. Format as `{"$oid": "$1"}` in JSON commands
-- **Transactions**: edg supports `transaction:` blocks for MongoDB using multi-document sessions. Commands run within a session context and are committed or rolled back atomically. Use the same `transaction:` / `locals` / `rollback_if` syntax as SQL drivers
+- **Transactions**: edg supports `transaction` blocks for MongoDB using multi-document sessions. Commands run within a session context and are committed or rolled back atomically. Use the same `transaction` / `let` / `rollback_if` syntax as SQL drivers
 - **Transaction-safe counting**: The `count` command and `$count` aggregation stage cannot be used inside multi-document transactions. Use `$group` with `$cond` instead - it always returns a document even when no rows match:
   ```json
   {"aggregate": "coll", "pipeline": [{"$group": {"_id": null, "n": {"$sum": {"$cond": [{"$eq": ["$field", true]}, 1, 0]}}}}], "cursor": {}}
@@ -1170,50 +853,35 @@ MongoDB uses BSON/JSON command syntax instead of SQL. Queries are JSON objects s
 - **Consistency tuning**: MongoDB tuning is done via URI parameters in `--url`, not dedicated CLI flags. Append `?w=majority` for write concern, `?readConcernLevel=majority` for read concern, and `?readPreference=secondaryPreferred` for read routing. Use `--retries 3` to handle transient `WriteConflict` errors under contention
 
 Example:
-```yaml
-up:
-  - name: create_users
-    type: exec
-    query: |-
-      {"create": "users"}
+```edg
+up {
+  create_users `{"create": "users"}`
+}
 
-seed:
-  - name: insert_users
-    type: exec_batch
-    count: 1000
-    args:
-      - gen('uuid')
-      - gen('email')
-    query: |-
-      {"insert": "users", "documents": [{"_id": $1, "email": $2}]}
+seed {
+  insert_users(count: 1000)
+    `{"insert": "users", "documents": [{"_id": $1, "email": $2}]}`
+    (gen('uuid'), gen('email'))
 
-  - name: fetch_users
-    query: |-
-      {"find": "users", "filter": {}}
+  fetch_users `{"find": "users", "filter": {}}`
+}
 
-init:
-  - name: load_users
-    query: |-
-      {"find": "users", "filter": {}}
+init {
+  load_users `{"find": "users", "filter": {}}`
+}
 
-run:
-  - name: get_user
-    args:
-      - ref_rand('load_users')._id
-    query: |-
-      {"find": "users", "filter": {"_id": $1}}
+run {
+  get_user `{"find": "users", "filter": {"_id": $1}}`
+    (ref_rand('load_users')._id)
+}
 
-deseed:
-  - name: delete_users
-    type: exec
-    query: |-
-      {"delete": "users", "deletes": [{"q": {}, "limit": 0}]}
+deseed {
+  delete_users `{"delete": "users", "deletes": [{"q": {}, "limit": 0}]}`
+}
 
-down:
-  - name: drop_users
-    type: exec
-    query: |-
-      {"drop": "users"}
+down {
+  drop_users `{"drop": "users"}`
+}
 ```
 
 ### cassandra
@@ -1230,7 +898,7 @@ Cassandra uses CQL (Cassandra Query Language). Tables must live inside a keyspac
 - **Cleanup**: `TRUNCATE ks.table` for deseed
 - **Teardown**: `DROP TABLE IF EXISTS ks.table` then `DROP KEYSPACE IF EXISTS ks`
 - **Placeholders**: Use `$1`, `$2`, etc.; edg converts to `?` automatically
-- **Transactions**: edg supports `transaction:` blocks for Cassandra using logged batches. Reads execute immediately; writes are buffered and committed atomically. Use the same `transaction:` / `locals` / `rollback_if` syntax as SQL drivers
+- **Transactions**: edg supports `transaction` blocks for Cassandra using logged batches. Reads execute immediately; writes are buffered and committed atomically. Use the same `transaction` / `let` / `rollback_if` syntax as SQL drivers
 - **Multi-host URLs**: Comma-separated hosts in the URL: `cassandra://user:pass@host1,host2,host3:9042/keyspace`. Port and auth apply to all hosts
 - **Consistency tuning**: Use `--cassandra-default-consistency` to set read/write consistency (`one`, `quorum`, `all`, `local_quorum`, etc.). Default is `quorum`
 - **Serial consistency**: Use `--cassandra-serial-consistency` for lightweight transactions (LWT). Values: `serial` (global Paxos) or `local_serial` (local DC only, default)
@@ -1239,61 +907,40 @@ Cassandra uses CQL (Cassandra Query Language). Tables must live inside a keyspac
 - **LWT workloads**: Require `--no-atomic-tx` since Cassandra does not support `IF` conditions inside batches
 
 Example:
-```yaml
-up:
-  - name: create_keyspace
-    type: exec
-    query: |-
-      CREATE KEYSPACE IF NOT EXISTS edg
-      WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}
+```edg
+up {
+  create_keyspace `CREATE KEYSPACE IF NOT EXISTS edg
+    WITH replication = {'class': 'SimpleStrategy', 'replication_factor': 1}`
 
-  - name: create_users
-    type: exec
-    query: |-
-      CREATE TABLE IF NOT EXISTS edg.users (
-        id UUID PRIMARY KEY,
-        email TEXT
-      )
+  create_users `CREATE TABLE IF NOT EXISTS edg.users (
+    id UUID PRIMARY KEY,
+    email TEXT
+  )`
+}
 
-seed:
-  - name: insert_users
-    type: exec_batch
-    count: 1000
-    args:
-      - gen('uuid')
-      - gen('email')
-    query: |-
-      INSERT INTO edg.users (id, email) VALUES ($1, $2)
+seed {
+  insert_users(count: 1000)
+    `INSERT INTO edg.users (id, email) VALUES ($1, $2)`
+    (gen('uuid'), gen('email'))
 
-  - name: fetch_users
-    query: |-
-      SELECT id, email FROM edg.users
+  fetch_users `SELECT id, email FROM edg.users`
+}
 
-init:
-  - name: load_users
-    query: |-
-      SELECT id FROM edg.users
+init {
+  load_users `SELECT id FROM edg.users`
+}
 
-run:
-  - name: get_user
-    args:
-      - ref_rand('load_users').id
-    query: |-
-      SELECT id, email FROM edg.users WHERE id = $1
+run {
+  get_user `SELECT id, email FROM edg.users WHERE id = $1`
+    (ref_rand('load_users').id)
+}
 
-deseed:
-  - name: truncate_users
-    type: exec
-    query: TRUNCATE edg.users
+deseed { truncate_users `TRUNCATE edg.users` }
 
-down:
-  - name: drop_users
-    type: exec
-    query: DROP TABLE IF EXISTS edg.users
-
-  - name: drop_keyspace
-    type: exec
-    query: DROP KEYSPACE IF EXISTS edg
+down {
+  drop_users `DROP TABLE IF EXISTS edg.users`
+  drop_keyspace `DROP KEYSPACE IF EXISTS edg`
+}
 ```
 
 ## Generating from an existing database
@@ -1302,19 +949,19 @@ If the user already has a database with tables, suggest `edg init` to generate a
 
 ```sh
 # PostgreSQL / CockroachDB
-edg init --driver pgx --url "postgres://..." --schema public > workload.yaml
+edg init --driver pgx --url "postgres://..." --schema public > workload.edg
 
 # MySQL (use --database for the database name)
-edg init --driver mysql --url "root:pass@tcp(localhost:3306)/dbname?parseTime=true" --database dbname > workload.yaml
+edg init --driver mysql --url "root:pass@tcp(localhost:3306)/dbname?parseTime=true" --database dbname > workload.edg
 
 # MSSQL
-edg init --driver mssql --url "sqlserver://..." --schema dbo > workload.yaml
+edg init --driver mssql --url "sqlserver://..." --schema dbo > workload.edg
 
 # Oracle
-edg init --driver oracle --url "oracle://..." --schema SYSTEM > workload.yaml
+edg init --driver oracle --url "oracle://..." --schema SYSTEM > workload.edg
 
 # Aurora DSQL
-edg init --driver dsql --url "clusterid.dsql.us-east-1.on.aws" --schema public > workload.yaml
+edg init --driver dsql --url "clusterid.dsql.us-east-1.on.aws" --schema public > workload.edg
 ```
 
 The `--schema` and `--database` flags are interchangeable. Use `--schema` for drivers where the value is a schema name (pgx, dsql, mssql, oracle) and `--database` for drivers where it's a database name (mysql).
@@ -1384,24 +1031,21 @@ Do NOT generate configs with these errors:
 
 | Mistake | Why it breaks | Fix |
 |---|---|---|
-| Missing `type: query` on `init` queries | Defaults to `exec`, won't populate the named dataset | Add `type: query` to every `init` entry |
-| `ref_rand('x')` before dataset `x` is populated | No `init` or `seed` query with `type: query` named `x` exists | Add an `init` query with `name: x` and `type: query` |
-| `exec_batch`/`query_batch` inside `transaction:` | Not supported - batch types cannot be used in transactions | Use `exec`/`query` inside transactions |
-| `prepared: true` inside `transaction:` | Not supported | Remove `prepared: true` from transaction queries |
+| SELECT in `init` without explicit type | Type inferred as `exec` from context, won't populate named dataset | Ensure init SELECT queries populate datasets correctly |
+| `ref_rand('x')` before dataset `x` is populated | No `init` or `seed` query named `x` exists | Add an `init` or `seed` query that populates `x` |
+| Batch types inside `transaction` | Not supported - batch types cannot be used in transactions | Use regular queries inside transactions |
+| `prepared: true` inside `transaction` | Not supported | Remove `prepared: true` from transaction queries |
 | `gen('number:1,100')` for Spanner INT64 columns | Returns float64, Spanner rejects for INT64 bind params | Wrap in `int()`: `int(gen('number:1,100'))` |
 | Mixing named and positional args in one query | Mutually exclusive - use map-style OR list-style, not both | Pick one form per query |
-| `seq_global("name")` without `seq:` section | Sequence doesn't exist at runtime | Add matching `seq:` config entry |
-| `count`/`size` on non-batch query types | Only valid for `exec_batch`/`query_batch` | Use `type: exec_batch` or remove `count`/`size` |
+| `seq_global("name")` without `seq:` section | Sequence doesn't exist at runtime (YAML-only feature) | Switch to YAML format and add `seq:` config |
+| `count`/`size` on non-batch query types | Only valid for batch operations | Add batch count/size as query options |
 | `__values__` with MongoDB or Cassandra | Only works with SQL drivers (pgx, mysql, mssql, oracle, spanner, dsql) | Use single-document inserts for MongoDB, standard CQL for Cassandra |
-| `run_weights` referencing nonexistent run item | Key must match a `name` in `run` section | Fix name or add matching run item |
-| Run items without `name` when `run_weights` is set | All run items need names for weight matching | Add `name` to every run item |
-| `- rollback` outside a transaction | `rollback` only valid inside transactions | Use `- noop` or remove the entry |
-| Standalone `if`/`match` with `run_weights` | Conditional blocks can't be weighted | Remove conditionals from weighted run or remove `run_weights` |
-| Using DSL for stages/conditionals/seq/print/complete | These features are YAML-only | Switch to `.yaml` format |
-| Using `query: \|-` syntax in `.edg` files | DSL uses backticks for SQL, not YAML block scalars | Use `` `SQL here` `` |
-| Missing backticks around SQL in DSL | Parser expects backtick-delimited SQL | Wrap SQL in backticks |
-| Using `name:` / `type:` YAML keys in DSL | DSL infers type from SQL verb; name is a bare identifier | Use DSL syntax: `query_name \`SQL\`` |
-| DSL args `(...)` on a new line after SQL backtick | Parser expects identifier, sees `(` - treats args as a new (invalid) query | Put opening `(` on the same line as the closing backtick: `` \`SQL\` ( `` then args can wrap to next lines |
+| `weights` referencing nonexistent run item | Key must match a query name in `run` section | Fix name or add matching run query |
+| `rollback` outside a transaction | `rollback` only valid inside transactions | Use `noop` or remove the entry |
+| Standalone `if`/`match` with `weights` | Conditional blocks can't be weighted | Remove conditionals from weighted run or remove `weights` |
+| Using stages/conditionals/seq/print/complete in DSL | These features are YAML-only | Switch to `.yaml` format |
+| Missing backticks around SQL | Parser expects backtick-delimited SQL | Wrap SQL in backticks |
+| Args `(...)` on a new line after SQL backtick | Parser expects identifier, sees `(` - treats args as a new (invalid) query | Put opening `(` on the same line as the closing backtick: `` \`SQL\` ( `` then args can wrap to next lines |
 
 ## Staging (file output without a database)
 
@@ -1448,71 +1092,53 @@ When the user wants to test dual-write consistency, CDC pipelines, or cross-data
 - **Batch SQL**: Use `__values__` for a cross-driver multi-row VALUES clause (works with pgx, mysql, mssql, spanner, dsql, and oracle via `__values__(table(cols))`). Also works with `type: exec` + `gen_batch()`/`batch()`/`ref_each()`.
 - **Precision for floats**: When comparing across SQL and NoSQL databases, use `uniform_f(min, max, precision)` to generate floats with fixed decimal places. This avoids false mismatches from floating-point representation differences (e.g. `364.8` vs `364.80`).
 - **No `run` section**: Sync configs only need `up`, `seed`, `deseed`, and `down`. The benchmark workload is separate.
-- **Shared globals**: Both configs should use the same `globals` values (row counts, batch sizes).
+- **Shared globals**: Both configs should use the same `let` values (row counts, batch sizes).
 - **Cassandra batch size**: Cassandra rejects large batches. Use `size: 50` or similar in the config to keep batches small.
 
 ### Example
 
 For a CockroachDB + MySQL sync pair, generate two files:
 
-**crdb.yaml:**
-```yaml
-globals:
-  user_count: 1000
-  batch_size: 100
+**crdb.edg:**
+```edg
+let user_count = 1000
+let batch_size = 100
 
-up:
-  - name: create_users
-    query: |-
-      CREATE TABLE IF NOT EXISTS users (
-        id INT PRIMARY KEY,
-        email VARCHAR(255) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW()
-      )
+up {
+  create_users `CREATE TABLE IF NOT EXISTS users (
+    id INT PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+  )`
+}
 
-seed:
-  - name: seed_users
-    type: exec_batch
-    count: user_count
-    size: batch_size
-    args:
-      - seq(1, 1)
-      - gen('email')
-      - gen('name')
-    query: |-
-      INSERT INTO users (id, email, name)
-      __values__
+seed {
+  seed_users(count: user_count, size: batch_size)
+    `INSERT INTO users (id, email, name) __values__`
+    (seq(1, 1), gen('email'), gen('name'))
+}
 ```
 
-**mysql.yaml:**
-```yaml
-globals:
-  user_count: 1000
-  batch_size: 100
+**mysql.edg:**
+```edg
+let user_count = 1000
+let batch_size = 100
 
-up:
-  - name: create_users
-    query: |-
-      CREATE TABLE IF NOT EXISTS users (
-        id INT PRIMARY KEY,
-        email VARCHAR(255) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-      )
+up {
+  create_users `CREATE TABLE IF NOT EXISTS users (
+    id INT PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`
+}
 
-seed:
-  - name: seed_users
-    type: exec_batch
-    count: user_count
-    size: batch_size
-    args:
-      - seq(1, 1)
-      - gen('email')
-      - gen('name')
-    query: |-
-      INSERT INTO users (id, email, name)
-      __values__
+seed {
+  seed_users(count: user_count, size: batch_size)
+    `INSERT INTO users (id, email, name) __values__`
+    (seq(1, 1), gen('email'), gen('name'))
+}
 ```
 
 ### Usage
@@ -1521,8 +1147,8 @@ After generating paired configs, show the user how to run them:
 
 ```sh
 edg sync run \
-  --source-driver pgx --source-url "postgres://..." --source-config crdb.yaml \
-  --target-driver mysql --target-url "root:pass@tcp(...)/?parseTime=true" --target-config mysql.yaml \
+  --source-driver pgx --source-url "postgres://..." --source-config crdb.edg \
+  --target-driver mysql --target-url "root:pass@tcp(...)/?parseTime=true" --target-config mysql.edg \
   --rng-seed 42
 
 edg sync verify \
@@ -1546,8 +1172,8 @@ When the user wants to benchmark the same workload against two databases side-by
 - **Matching schemas**: Same table names, column names, and logical types. SQL dialect differs per driver.
 - **Matching seed args**: Both configs should use identical `args` expressions for deterministic seeding with `--rng-seed`.
 - **Include a `run` section**: Unlike sync configs, compare configs must include `run` queries that define the workload to benchmark. Both configs should have the same logical queries adapted for each driver's SQL dialect.
-- **Same query names**: Use identical `name:` values in both configs so the TUI can show side-by-side comparisons per query.
-- **Weight parity**: If using `weight:` on run queries, use the same weights in both configs so the workload mix is comparable.
+- **Same query names**: Use identical query names in both configs so the TUI can show side-by-side comparisons per query.
+- **Weight parity**: If using `weights`, use the same weights in both configs so the workload mix is comparable.
 - **Use `exec_batch`**: Seed sections should use `type: exec_batch` with `count` and `size` for efficient bulk inserts.
 - **Batch SQL**: Use `__values__` for cross-driver multi-row VALUES clauses.
 
@@ -1555,108 +1181,78 @@ When the user wants to benchmark the same workload against two databases side-by
 
 For a Postgres + MySQL comparison, generate two files:
 
-**postgres.yaml:**
-```yaml
-globals:
-  user_count: 1000
-  batch_size: 100
+**postgres.edg:**
+```edg
+let user_count = 1000
+let batch_size = 100
 
-up:
-  - name: create_users
-    query: |-
-      CREATE TABLE IF NOT EXISTS users (
-        id INT PRIMARY KEY,
-        email VARCHAR(255) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT NOW()
-      )
+up {
+  create_users `CREATE TABLE IF NOT EXISTS users (
+    id INT PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT NOW()
+  )`
+}
 
-seed:
-  - name: seed_users
-    type: exec_batch
-    count: user_count
-    size: batch_size
-    args:
-      - seq(1, 1)
-      - gen('email')
-      - gen('name')
-    query: |-
-      INSERT INTO users (id, email, name)
-      __values__
+seed {
+  seed_users(count: user_count, size: batch_size)
+    `INSERT INTO users (id, email, name) __values__`
+    (seq(1, 1), gen('email'), gen('name'))
+}
 
-run:
-  - name: lookup_user
-    type: query
-    args:
-      - uniform_i(1, user_count)
-    query: |-
-      SELECT id, email, name
-      FROM users
-      WHERE id = $1
+run {
+  lookup_user
+    `SELECT id, email, name FROM users WHERE id = $1`
+    (uniform_i(1, user_count))
 
-  - name: insert_user
-    type: exec
-    weight: 20
-    args:
-      - gen('number:100000,999999')
-      - gen('email')
-      - gen('name')
-    query: |-
-      INSERT INTO users (id, email, name)
-      VALUES ($1, $2, $3)
-      ON CONFLICT (id) DO NOTHING
+  insert_user
+    `INSERT INTO users (id, email, name) VALUES ($1, $2, $3)
+     ON CONFLICT (id) DO NOTHING`
+    (gen('number:100000,999999'), gen('email'), gen('name'))
+}
+
+weights {
+  lookup_user = 80
+  insert_user = 20
+}
 ```
 
-**mysql.yaml:**
-```yaml
-globals:
-  user_count: 1000
-  batch_size: 100
+**mysql.edg:**
+```edg
+let user_count = 1000
+let batch_size = 100
 
-up:
-  - name: create_users
-    query: |-
-      CREATE TABLE IF NOT EXISTS users (
-        id INT PRIMARY KEY,
-        email VARCHAR(255) NOT NULL,
-        name VARCHAR(255) NOT NULL,
-        created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
-      )
+up {
+  create_users `CREATE TABLE IF NOT EXISTS users (
+    id INT PRIMARY KEY,
+    email VARCHAR(255) NOT NULL,
+    name VARCHAR(255) NOT NULL,
+    created_at TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP
+  )`
+}
 
-seed:
-  - name: seed_users
-    type: exec_batch
-    count: user_count
-    size: batch_size
-    args:
-      - seq(1, 1)
-      - gen('email')
-      - gen('name')
-    query: |-
-      INSERT INTO users (id, email, name)
-      __values__
+seed {
+  seed_users(count: user_count, size: batch_size)
+    `INSERT INTO users (id, email, name) __values__`
+    (seq(1, 1), gen('email'), gen('name'))
+}
 
-run:
-  - name: lookup_user
-    type: query
-    args:
-      - uniform_i(1, user_count)
-    query: |-
-      SELECT id, email, name
-      FROM users
-      WHERE id = ?
+run {
+  lookup_user
+    `SELECT id, email, name FROM users WHERE id = $1`
+    (uniform_i(1, user_count))
 
-  - name: insert_user
-    type: exec
-    weight: 20
-    args:
-      - gen('number:100000,999999')
-      - gen('email')
-      - gen('name')
-    query: |-
-      INSERT INTO users (id, email, name)
-      VALUES (?, ?, ?)
-      ON DUPLICATE KEY UPDATE email = VALUES(email)
+  insert_user
+    `INSERT INTO users (id, email, name) VALUES ($1, $2, $3)
+     ON DUPLICATE KEY UPDATE email = VALUES(email)`
+    (gen('number:100000,999999'), gen('email'), gen('name'))
+}
+
+weights {
+  lookup_user = 80
+  insert_user = 20
+}
 ```
 
 ### Usage
@@ -1665,11 +1261,43 @@ After generating paired configs, show the user how to run them:
 
 ```sh
 edg compare all \
-  --a-driver pgx --a-url "postgres://root:password@localhost:5432/defaultdb?sslmode=disable" --a-config postgres.yaml \
-  --b-driver mysql --b-url "root:password@tcp(localhost:3306)/defaultdb?parseTime=true" --b-config mysql.yaml \
+  --a-driver pgx --a-url "postgres://root:password@localhost:5432/defaultdb?sslmode=disable" --a-config postgres.edg \
+  --b-driver mysql --b-url "root:password@tcp(localhost:3306)/defaultdb?parseTime=true" --b-config mysql.edg \
   --rng-seed 42 -w 4 -d 30s --tui
 ```
 
 Or run each phase separately with `edg compare up`, `edg compare seed`, `edg compare run`, `edg compare deseed`, `edg compare down`.
 
 Add `--tui` for an interactive side-by-side TUI with merged tables and overlaid latency graphs. Without `--tui`, results print to stdout with delta percentages at the end.
+
+## Cluster Configs (Distributed Runners)
+
+When the user wants to run workloads across multiple agents (pods, nodes, clouds, or regions) with coordinated stages and global QPS control, generate a config for use with `edg cluster`. Requires a pro license and a CockroachDB instance for coordination.
+
+### How cluster configs differ from regular configs
+
+- **Same config format**: Cluster configs use the same DSL (or YAML) format as regular configs. The coordinator distributes the config blob to agents.
+- **Stages drive coordination**: When stages are defined, the coordinator orchestrates stage transitions across all agents. Stages require YAML format.
+- **QPS is global**: A stage's `qps` value is the total across all agents. The coordinator divides it evenly: `per_agent_qps = ceil(total_qps / active_agent_count)`.
+- **Workers are per-agent**: The `workers` value in each stage is the number of concurrent workers *on each agent*, not the global total.
+- **Region labels**: Each agent has a `--region` flag. All Prometheus metrics include a `region` label for per-region dashboards.
+
+### Usage
+
+```sh
+# Start coordinator
+edg cluster coordinator --crdb-url "postgres://root@localhost:26257/edg_cluster?sslmode=disable"
+
+# Start agents in different regions
+edg cluster agent --crdb-url "..." --region us-east
+edg cluster agent --crdb-url "..." --region eu-west
+
+# Submit workload
+edg cluster submit \
+  --target-url "postgres://root@localhost:26257?sslmode=disable" \
+  --config workload.edg \
+  --duration 5m \
+  --workers 10 \
+  --regions us-east,eu-west \
+  --stream
+```
