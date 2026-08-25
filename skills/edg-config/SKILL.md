@@ -65,19 +65,7 @@ Match user request features to example directories:
 | Expectations / CI | `expectations/` |
 | Invoice line items | `invoice_lines/` |
 
-If the target driver doesn't have an example in that directory, read the `crdb.yaml` version and adapt the SQL dialect.
-
-### DSL Limitations
-
-The following features are **not available in DSL** and require YAML format (`.yaml`):
-- Stages (sequential workload phases)
-- Conditionals (`if`/`match`)
-- Global sequences (`seq:` config)
-- Print / post_print with custom aggregation
-- Expressions section
-- Complete section (LLM tools)
-
-If the user's workload requires any of these features, inform them that YAML format is needed and generate a `.yaml` file instead.
+If the target driver doesn't have an example in that directory, read the `crdb.edg` version and adapt the SQL dialect.
 
 ### Syntax Quick Reference
 
@@ -292,13 +280,13 @@ A complete edg DSL config (`.edg`) with all applicable sections:
 - `range(start, end)` / `range(start, end, step)` for generating integer arrays from start to end (both inclusive). Step defaults to 1; use negative step for descending. Useful with `set` to avoid hand-written arrays (e.g., `set(range(0, 23), weights)` instead of `set([0,1,2,...,23], weights)`)
 - `seq(start, step)` for auto-incrementing sequences (per worker)
 - `seq_alpha(length)` for auto-incrementing alpha sequences per worker (aaa, aab, aac, ...)
-- `seq_global("name")` for globally unique sequences shared across all workers (requires `seq:` config section)
-- `seq_alpha_global("name")` for globally unique alpha sequences across all workers (requires `seq:` config with `length`)
+- `seq_global("name")` for globally unique sequences shared across all workers (requires a top-level `seq name(start: N, step: M)` declaration)
+- `seq_alpha_global("name")` for globally unique alpha sequences across all workers (requires a top-level `seq name(length: L)` declaration)
 - `uniform.seq("name")` for uniform random picks from already-generated sequence values
 - `zipf.seq("name", s, v)` / `pareto.seq("name", alpha)` / `norm.seq("name", mean, stddev)` / `exp.seq("name", rate)` / `lognorm.seq("name", mu, sigma)` / `beta.seq("name", alpha, beta)` / `gamma.seq("name", shape, rate)` / `weibull.seq("name", shape, scale)` / `poisson.seq("name", lambda)` / `binomial.seq("name", n, p)` / `empirical.seq("name", samples)` for distribution-based picks from sequence values
 - Distribution-based vector functions pick cluster centroids using statistical distributions: `pareto.vector(dims, clusters, spread, alpha)`, `zipf.vector(dims, clusters, spread, s, v)`, `norm.vector(dims, clusters, spread, mean, stddev)`, `exp.vector(dims, clusters, spread, rate)` (cluster 0 hottest), `lognorm.vector(dims, clusters, spread, mu, sigma)`
 - `embed(text...)` for real vector embeddings via an external API (OpenAI-compatible). Variadic - joins args with space. Requires a license and `--embed-api-key` or `EDG_EMBED_API_KEY`. Configure endpoint with `--embed-url`, model with `--embed-model`, dimensions with `--embed-dimensions`. Use for semantic similarity search with real embeddings instead of synthetic `vector()` clusters
-- `complete(tool_name, prompt)` for LLM-generated structured data via tool calling. Returns a map; access fields with `.field`. Define tools in `complete:` section (YAML-only). Use `locals` to call once per row and access multiple fields. Retries up to 3 times on missing/invalid tool calls, validates response types against schema. 120s per-request timeout. Requires a license and `--complete-api-key` or `EDG_COMPLETE_API_KEY`. Configure endpoint with `--complete-url`, model with `--complete-model`. Any OpenAI-compatible API works (Ollama, vLLM, etc.)
+- `complete(tool_name, prompt)` for LLM-generated structured data via tool calling. Returns a map; access fields with `.field`. Define tools in a top-level `complete { tool name(...) { ... } }` block. Use `locals` to call once per row and access multiple fields. Retries up to 3 times on missing/invalid tool calls, validates response types against schema. 120s per-request timeout. Requires a license and `--complete-api-key` or `EDG_COMPLETE_API_KEY`. Configure endpoint with `--complete-url`, model with `--complete-model`. Any OpenAI-compatible API works (Ollama, vLLM, etc.)
 - `complete_array(tool_name, prompt, count)` for generating N structured items in a single LLM call. Returns `[]map`; use with `ref_each(local(...))` to iterate. Tool schema auto-wrapped in array request. Memoized by (tool, prompt, count). Same config flags and license requirement as `complete()`
 - `global_iter()` for a monotonic iteration counter shared across all workers. Increments with every query execution. Use with math functions and globals to make data change shape over the life of a workload (temporal patterns)
 - `hook('name')` for accessing a parsed body field by name inside hook query args. Requires `parse_body: json` on the hook
@@ -378,7 +366,7 @@ A complete edg DSL config (`.edg`) with all applicable sections:
 - Check the scale of the weight before multiplying by it. Month, weekday, hour and a `mag: 12` spike stack up to a peak weight near 47, which turns a 2-item basket into a 30-item one. Damp it with `sqrt` and keep the raw weight in its own column if the correlation needs verifying
 
 ### Global sequences
-- Global sequences (`seq:` config) are a YAML-only feature. If the user needs globally unique integer IDs across concurrent workers, inform them that YAML format is needed
+- Declare a global sequence at the top level: `seq order_id(start: 1, step: 1)`
 - `seq_global("name")` in args returns the next value from the named sequence
 - Unlike `seq(start, step)` which is per-worker, `seq_global` is shared across all workers
 - Sequence counter continues across seed and run phases
@@ -388,7 +376,7 @@ A complete edg DSL config (`.edg`) with all applicable sections:
 
 ### Alpha sequences
 - `seq_alpha(length)` generates per-worker auto-incrementing alpha sequences (aaa, aab, aac, ...)
-- Global alpha sequences (`seq_alpha_global("name")`) require `seq:` config which is YAML-only
+- Global alpha sequences (`seq_alpha_global("name")`) require a top-level `seq name(length: L)` declaration
 - Length N gives 26^N possible values (length 3 = 17,576)
 
 ### CSV data (edg-lang only)
@@ -424,12 +412,12 @@ A complete edg DSL config (`.edg`) with all applicable sections:
 - `gen_locale('first_name', 'ja_JP')` for locale-aware names, cities, streets, phones, zips, addresses
 - `gen_locale('name', 'de_DE')` for full name in locale order (eastern = last+first, western = first last)
 - Supported locales: `en_US`, `ja_JP`, `de_DE`, `fr_FR`, `es_ES`, `pt_BR`, `zh_CN`, `ko_KR` (aliases: `ja`, `de`, etc.)
-- `mask(value)` for deterministic hex pseudonymization (16 chars default)
-- `mask(value, length)` for custom-length hex token
-- `mask(value, 'base64')` / `mask(value, 'base32')` for alternative encodings
-- `mask(value, 'asterisk')` for `****************` (length configurable)
-- `mask(value, 'redact')` for fixed `[REDACTED]` output
-- `mask(value, 'email')` to preserve `@domain` and mask local part: `mask(arg('email'), 'email', 4)` -> `****@example.com`
+- `mask(key, value)` for deterministic HMAC-keyed hex pseudonymization (16 chars default). The `key` argument is required - source it from `env('MASK_KEY')` so the mapping is stable across runs
+- `mask(key, value, length)` for custom-length hex token
+- `mask(key, value, 'base64')` / `mask(key, value, 'base32')` for alternative encodings
+- `mask(key, value, 'asterisk')` for `****************` (length configurable)
+- `mask(key, value, 'redact')` for fixed `[REDACTED]` output
+- `mask(key, value, 'email')` to preserve `@domain` and mask local part: `mask(env('MASK_KEY'), arg('email'), 'email', 4)` -> `****@example.com`
 - `hash(value, algo)` for a deterministic unkeyed hex digest, where `algo` is `md5` | `sha1` | `sha256` | `crc32` (lowercase hex, 32/40/64/8 chars respectively). Unlike `mask()` (HMAC-keyed pseudonymization), `hash()` takes no key, so the same input always yields the same digest across runs and machines. Use for dedup keys and shard selection, not for pseudonymization: `hash('user@example.com', 'sha256')`
 
 ### Dependent columns
@@ -525,7 +513,7 @@ A complete edg DSL config (`.edg`) with all applicable sections:
 - Use `ref_cursor(query, size, cursor_col, repeat?)` for keyset-paginated iteration over large tables. Pages through results using `WHERE cursor_col > last_value ORDER BY cursor_col LIMIT size`, fetching one page at a time with constant memory. Works with `__values__` for multi-row INSERTs. Ideal when `ref_each()` would load too many rows into memory (e.g. 10M+ rows). Optional `repeat` count gives exact cardinality: each row is returned N times before advancing. Examples: `ref_cursor('SELECT id FROM customer ORDER BY id', 1000, 'id')`, `ref_cursor('SELECT id FROM customer ORDER BY id', 1000, 'id', 3)` (3 children per customer)
 - Use `iter()` for a 1-based row counter within batch queries (resets per query)
 - Use `uniq("expression")` to retry a generator until a unique value is produced (e.g., `uniq("gen('airlineairportiata')")` for unique IATA codes). Defaults to 100 retries; override with `uniq("expression", 500)`
-- For composite uniqueness across columns, pass multiple expressions: `uniq("gen('first_name')", "gen('last_name')")[0]` and `...[1]`. Returns `[]any`; same-row calls with identical expressions return cached tuple
+- For composite uniqueness across columns, pass multiple expressions: `uniq("gen('firstname')", "gen('lastname')")[0]` and `...[1]`. Returns `[]any`; same-row calls with identical expressions return cached tuple
 - Use `uniq_across('pool_name', "expression")` for cross-query uniqueness. Unlike `uniq()` which resets between queries, `uniq_across` shares a named pool that persists across all queries. Use when values must be globally unique across tables (e.g., `uniq_across('emails', "gen('email')")` in both `users` and `admins` seeds). Supports composite tuples: `uniq_across('names', "gen('first')", "gen('last')")`
 - **`__values__` token (recommended)**: Use `__values__` in the query to generate a multi-row `VALUES` clause instead of driver-specific batch expansion (`unnest`/`JSON_TABLE`/`OPENJSON`). Produces `VALUES (v1, v2), (v3, v4), ...` - one INSERT per batch. Works with `exec_batch`/`query_batch` and also with `type: exec`/`query` when using batch-expanding args (`gen_batch()`, `batch()`, `ref_each()`, `ref_cursor()`). Works with pgx, mysql, mssql, spanner, sqlite, dsql. For Oracle, use `__values__(table(col1, col2))` to generate `INSERT ALL INTO table (cols) VALUES (...) ... SELECT 1 FROM DUAL`. Does not work with MongoDB, Cassandra, or Redis. Also supports upsert (`ON CONFLICT`/`ON DUPLICATE KEY`/`MERGE`) and update via CTE
 
@@ -574,11 +562,9 @@ A complete edg DSL config (`.edg`) with all applicable sections:
 - Batch types (`exec_batch`, `query_batch`) cannot be used inside a transaction
 - `prepared: true` cannot be used inside a transaction
 - Transactions appear in a separate TRANSACTION stats section (with COMMITS, ROLLBACKS, ERRORS columns)
-- Use `run_weights` to weight transactions against standalone queries (reference by transaction name)
+- Use `weights` to weight transactions against standalone queries (reference by transaction name)
 
 ### Conditionals (if/then/else and match/when/default)
-Conditionals are a **YAML-only feature**. If the user's workload requires conditional branching, inform them that YAML format is needed.
-
 - `if/then/else` for binary branching based on a boolean expression
 - `match/when/default` for multi-way dispatch
 - **Let in branches** - use `let` inside conditional branches to set variables that persist for the rest of the transaction. DSL syntax:
@@ -700,13 +686,17 @@ hooks {
 - Multiple HTTP hooks each get their own server on different `addr` values
 
 ### Stages
-Stages are a **YAML-only feature**. If the user's workload requires staged execution, inform them that YAML format is needed.
-
-- Define sequential workload phases with different worker counts and durations
-- Each stage has `name`, `workers`, `duration`, and optional `ramp_duration`, `qps`, and `run_weights` fields
+- Define sequential workload phases with different worker counts and durations:
+  ```edg
+  stages {
+    ramp(workers: 1, duration: 10s, weights: { check_balance: 90, credit_account: 5, make_transfer: 5 })
+    steady(workers: 10, duration: 30s, qps: ramp(10, 100, 10s))
+  }
+  ```
+- Each stage is named by its identifier and takes `workers` and `duration`, plus optional `ramp_duration`, `qps`, and `weights`
 - `qps` accepts a static integer (e.g. `qps: 1000`) or `ramp(start, end, duration)` to linearly increase QPS over time (e.g. `qps: ramp(10, 1000, 60s)` ramps from 10 to 1,000 QPS over 60 seconds)
 - `ramp_duration` controls worker staggering: for stages without `qps`, workers are spawned incrementally over the ramp period; for stages with a static `qps`, all workers start immediately and QPS increases linearly. `ramp_duration` is independent of `qps: ramp()`. Must be less than `duration`
-- When a stage defines `run_weights`, workers in that stage use those weights instead of the top-level `run_weights`
+- When a stage defines `weights`, workers in that stage use those weights instead of the top-level `weights` block
 - Workers (background queries) run for the entire duration across all stages, unaffected by per-stage weights
 - When `stages` is defined, the `-w` and `-d` CLI flags are ignored
 
@@ -1208,7 +1198,7 @@ The generated config is a starting point, seed expressions will match column typ
 
 ## Capturing from real query statistics
 
-If the user wants to generate a workload config that approximates a real production workload, suggest `edg capture`. It reads query statistics from built-in stats views (`pg_stat_statements` for PostgreSQL, `crdb_internal.statement_statistics` for CockroachDB) and produces a config with `run`, `run_weights`, and `stages` sections. Requires a pro license.
+If the user wants to generate a workload config that approximates a real production workload, suggest `edg capture`. It reads query statistics from built-in stats views (`pg_stat_statements` for PostgreSQL, `crdb_internal.statement_statistics` for CockroachDB, `performance_schema.events_statements_summary_by_digest` for MySQL) and produces a config with `run`, `weights`, and `stages` sections. Requires a pro license.
 
 ```sh
 # CockroachDB
@@ -1226,14 +1216,14 @@ edg capture \
   --name workload
 ```
 
-The `--name` flag is required and specifies the output file name without extension. Capture always writes both `<name>.yaml` and `<name>.edg`.
+The `--name` flag is required and specifies the output file name without extension. Capture writes `<name>.edg`.
 
 ### Capture flags
 
 | Flag | Required | Default | Description |
 |---|---|---|---|
-| `--flavour` | Yes | | Database flavour: `postgres` or `cockroachdb` |
-| `--name` | Yes | | Output file name without extension (writes both `.yaml` and `.edg`) |
+| `--flavour` | Yes | | Database flavour: `postgres`, `cockroachdb`, or `mysql` |
+| `--name` | Yes | | Output file name without extension (writes `.edg`) |
 | `--min-calls` | No | `10` | Minimum call count to include a query |
 | `--top` | No | `50` | Maximum number of queries to include |
 | `--duration` | No | `1h` | Assumed observation window for think time calculation |
@@ -1254,12 +1244,12 @@ edg capture \
   --name workload
 ```
 
-Without `--schema`, the output contains only `stages`, `run_weights`, and `run` - suitable for replaying against an existing database.
+Without `--schema`, the output contains only `stages`, `weights`, and `run` - suitable for replaying against an existing database.
 
 ### Captured config notes
 
 - Query parameters are set to `TODO` placeholders. The user must replace these with appropriate expressions (e.g., `ref('fetch_users').id`).
-- `run_weights` are proportional to observed call counts.
+- `weights` are proportional to observed call counts.
 - Per-query `wait` durations are derived from inter-arrival times.
 - A single `stages` entry is generated matching the observation window and worker count.
 
@@ -1275,13 +1265,12 @@ Do NOT generate configs with these errors:
 | `prepared: true` inside `transaction` | Not supported | Remove `prepared: true` from transaction queries |
 | `gen('number:1,100')` for Spanner INT64 columns | Returns float64, Spanner rejects for INT64 bind params | Wrap in `int()`: `int(gen('number:1,100'))` |
 | Mixing named and positional args in one query | Mutually exclusive - use map-style OR list-style, not both | Pick one form per query |
-| `seq_global("name")` without `seq:` section | Sequence doesn't exist at runtime (YAML-only feature) | Switch to YAML format and add `seq:` config |
+| `seq_global("name")` without a `seq` declaration | Sequence doesn't exist at runtime | Add a top-level `seq name(start: 1, step: 1)` declaration |
 | `count`/`size` on non-batch query types | Only valid for batch operations | Add batch count/size as query options |
 | `__values__` with MongoDB, Cassandra, or Redis | Only works with SQL drivers (pgx, mysql, mssql, oracle, spanner, sqlite, dsql) | Use single-document inserts for MongoDB, standard CQL for Cassandra, one command per row for Redis |
 | `weights` referencing nonexistent run item | Key must match a query name in `run` section | Fix name or add matching run query |
 | `rollback` outside a transaction | `rollback` only valid inside transactions | Use `noop` or remove the entry |
 | Standalone `if`/`match` with `weights` | Conditional blocks can't be weighted | Remove conditionals from weighted run or remove `weights` |
-| Using stages/conditionals/seq/print/complete in DSL | These features are YAML-only | Switch to `.yaml` format |
 | Missing backticks around SQL | Parser expects backtick-delimited SQL | Wrap SQL in backticks |
 | Args `(...)` on a new line after SQL backtick | Parser expects identifier, sees `(` - treats args as a new (invalid) query | Put opening `(` on the same line as the closing backtick: `` \`SQL\` ( `` then args can wrap to next lines |
 
@@ -1514,8 +1503,8 @@ When the user wants to run workloads across multiple agents (pods, nodes, clouds
 
 ### How cluster configs differ from regular configs
 
-- **Same config format**: Cluster configs use the same DSL (or YAML) format as regular configs. The coordinator distributes the config blob to agents.
-- **Stages drive coordination**: When stages are defined, the coordinator orchestrates stage transitions across all agents. Stages require YAML format.
+- **Same config format**: Cluster configs use the same edg-lang format as regular configs. The coordinator distributes the config blob to agents.
+- **Stages drive coordination**: When stages are defined, the coordinator orchestrates stage transitions across all agents.
 - **QPS is global**: A stage's `qps` value is the total across all agents. The coordinator divides it evenly: `per_agent_qps = ceil(total_qps / active_agent_count)`.
 - **Workers are per-agent**: The `workers` value in each stage is the number of concurrent workers *on each agent*, not the global total.
 - **Region labels**: Each agent has a `--region` flag. All Prometheus metrics include a `region` label for per-region dashboards.

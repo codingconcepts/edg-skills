@@ -15,28 +15,21 @@ You help users compose, debug, and understand edg expressions. edg uses [expr-la
 - Debug expression syntax errors
 - Suggest the REPL for interactive testing: `edg repl`
 
-## Expressions in YAML vs DSL
+## Where expressions live
 
-All expressions are identical in both formats - same functions, same syntax. Only the surrounding config structure differs:
+edg-lang (`.edg`) is the only config format. Expressions appear as query args, either positional or named:
 
-**YAML:**
-```yaml
-args:
-  - ref('fetch_users').id
-  - gen('email')
-```
-
-**DSL (positional):**
+**Positional:**
 ```edg
 query_name `SELECT ...` (ref('fetch_users').id, gen('email'))
 ```
 
-**DSL (named):**
+**Named:**
 ```edg
 query_name `SELECT ...` (user_id: ref('fetch_users').id, email: gen('email'))
 ```
 
-When helping with expressions, ask which format the user is working with if it affects the answer (e.g., wrapping syntax). The expression itself is always the same.
+Named args are required when another expression in the same query reads the value back with `arg('name')`. Pick one form per query - mixing named and positional args in a single query is an error.
 
 ## Quick Reference
 
@@ -50,8 +43,8 @@ When helping with expressions, ask which format the user is working with if it a
 | `ulid()` | Sortable 26-char Crockford base32 ID (48-bit ms timestamp + 80 random bits) |
 | `seq(start, step)` | Auto-incrementing counter per worker |
 | `seq_alpha(length)` | Auto-incrementing alpha sequence per worker (aaa, aab, aac, ...) |
-| `seq_global(name)` | Shared auto-incrementing counter across all workers (requires `seq:` config section) |
-| `seq_alpha_global(name)` | Shared auto-incrementing alpha sequence across all workers (requires `seq:` config with `length`) |
+| `seq_global(name)` | Shared auto-incrementing counter across all workers (requires a top-level `seq name(start: N, step: M)`) |
+| `seq_alpha_global(name)` | Shared auto-incrementing alpha sequence across all workers (requires a top-level `seq name(length: L)`) |
 | `uniform.seq(name)` | Uniform random from generated sequence values |
 | `zipf.seq(name, s, v)` | Zipfian-distributed pick from sequence (hot early values) |
 | `norm.seq(name, mean, stddev)` | Normal-distributed pick from sequence |
@@ -146,26 +139,41 @@ There is deliberately no `binomial.float`, `poisson.float` or `zipf.float` - tho
 | `complete(tool_name, prompt)` | Generate structured data via LLM tool calling. Returns a map; access fields with dot notation. Retries up to 3 times on missing/invalid tool calls. Validates response types against tool schema. 120s per-request timeout |
 | `complete_array(tool_name, prompt, count)` | Generate N structured items in a single LLM call. Returns `[]map`; use with `ref_each()` to iterate. Schema auto-wrapped in array. Memoized by (tool, prompt, count). Same retry/validation as `complete()` |
 
-Use `locals` to call once per row and access multiple fields:
-```yaml
+Declare a query-level `let` to call once per row and access multiple fields. `let` bindings go between the SQL backtick and the args:
+
+```edg
 # Single item
-locals:
-  review: 'complete("review", "Review: " + name)'
-args:
-  - local("review").review_text
-  - local("review").sentiment
-  - local("review").rating
+insert_review(type: exec) `INSERT INTO review (text, sentiment, rating) VALUES ($1, $2, $3)`
+  let review = complete('review', 'Review: ' + ref_same('products').name)
+  (
+    local('review').review_text,
+    local('review').sentiment,
+    local('review').rating
+  )
 
 # Batch (N items in one call)
-locals:
-  reviews: 'complete_array("review", "Generate 5 reviews", 5)'
-args:
-  - ref_each(local("reviews")).review_text
-  - ref_each(local("reviews")).sentiment
-  - ref_each(local("reviews")).rating
+insert_reviews(type: exec_batch, count: 5, size: 5) `INSERT INTO review (text, sentiment, rating) __values__`
+  let reviews = complete_array('review', 'Generate 5 reviews', 5)
+  (
+    ref_each(local('reviews')).review_text,
+    ref_each(local('reviews')).sentiment,
+    ref_each(local('reviews')).rating
+  )
 ```
 
-Requires a license and `--complete-api-key` (or `EDG_COMPLETE_API_KEY`). Configure endpoint with `--complete-url`, model with `--complete-model`. Any OpenAI-compatible API works (Ollama, vLLM, etc.). Tool schema defined in `complete:` YAML section.
+Tool schemas are defined in a top-level `complete` block:
+
+```edg
+complete {
+  tool review(system: 'You are a product review generator.') {
+    rating(description: 'Star rating from 1 to 5', type: 'integer', required: true)
+    review_text(description: 'A 2-3 sentence review', type: 'string', required: true)
+    sentiment(description: 'Overall sentiment', enum: '[positive negative neutral]', type: 'string', required: true)
+  }
+}
+```
+
+Requires a license and `--complete-api-key` (or `EDG_COMPLETE_API_KEY`). Configure endpoint with `--complete-url`, model with `--complete-model`. Any OpenAI-compatible API works (Ollama, vLLM, etc.).
 
 ### Reference Data
 | Function | Scope | Description |
@@ -274,15 +282,15 @@ Errors if `minN < 1`, if `maxN < minN`, or if N distinct values aren't found wit
 |---|---|
 | `gen_locale('first_name', 'ja_JP')` | Locale-aware name/address/phone generation |
 | `gen_locale('name', 'de_DE')` | Full name in locale order (eastern = last+first, western = first last) |
-| `mask(value)` | Deterministic 16-char hex token (same input -> same output) |
-| `mask(value, length)` | Hex token truncated to `length` chars |
-| `mask(value, 'base64')` | Base64-encoded token |
-| `mask(value, 'base32')` | Base32-encoded token |
-| `mask(value, 'asterisk')` | Repeated `*` characters (default 16) |
-| `mask(value, 'asterisk', 4)` | 4 asterisks |
-| `mask(value, 'redact')` | Fixed string `[REDACTED]`, length ignored |
-| `mask(value, 'email')` | Preserves `@domain`, masks local part with `*` |
-| `mask(value, 'email', 4)` | `****@domain.com` |
+| `mask(key, value)` | Deterministic 16-char hex token, HMAC-keyed by `key` (same key + input -> same output) |
+| `mask(key, value, length)` | Hex token truncated to `length` chars |
+| `mask(key, value, 'base64')` | Base64-encoded token |
+| `mask(key, value, 'base32')` | Base32-encoded token |
+| `mask(key, value, 'asterisk')` | Repeated `*` characters (default 16) |
+| `mask(key, value, 'asterisk', 4)` | 4 asterisks |
+| `mask(key, value, 'redact')` | Fixed string `[REDACTED]`, length ignored |
+| `mask(key, value, 'email')` | Preserves `@domain`, masks local part with `*` |
+| `mask(key, value, 'email', 4)` | `****@domain.com` |
 | `hash(value, algo)` | Deterministic unkeyed hex digest; `algo` is `md5`, `sha1`, `sha256` or `crc32` |
 
 `hash()` returns lowercase hex of 32, 40, 64 or 8 chars respectively. Unlike `mask()` (HMAC-keyed pseudonymization), `hash()` takes no key, so the same input always yields the same digest across runs and machines. Use it for dedup keys and shard selection, not for pseudonymization.
@@ -334,162 +342,158 @@ Supported locales: `en_US`, `ja_JP`, `de_DE`, `fr_FR`, `es_ES`, `pt_BR`, `zh_CN`
 ## Common Patterns
 
 ### Mutually exclusive columns
-```yaml
-args:
-  - bool()                            # coin flip
-  - cond(arg(0), gen('email'), nil)   # email if true
-  - cond(!arg(0), gen('phone'), nil)  # phone if false
+```edg
+insert_contact(type: exec) `INSERT INTO contact (is_email, email, phone) VALUES ($1, $2, $3)` (
+  bool(),                            # coin flip
+  cond(arg(0), gen('email'), nil),   # email if true
+  cond(!arg(0), gen('phone'), nil)   # phone if false
+)
 ```
 
 ### Computed total from earlier args
-```yaml
+```edg
 # Positional
-args:
-  - uniform.float(1.00, 99.99, 2)   # price
-  - gen('number:1,10')           # quantity
-  - arg(0) * float(arg(1))      # total = price * qty
+insert_line(type: exec) `INSERT INTO line (price, qty, total) VALUES ($1, $2, $3)` (
+  uniform.float(1.00, 99.99, 2),   # price
+  gen('number:1,10'),              # quantity
+  arg(0) * float(arg(1))           # total = price * qty
+)
 
 # Named (equivalent)
-args:
-  price: uniform.float(1.00, 99.99, 2)
-  quantity: gen('number:1,10')
-  total: arg('price') * float(arg('quantity'))
+insert_line(type: exec) `INSERT INTO line (price, qty, total) VALUES ($1, $2, $3)` (
+  price:    uniform.float(1.00, 99.99, 2),
+  quantity: gen('number:1,10'),
+  total:    arg('price') * float(arg('quantity'))
+)
 ```
 
 ### Full name from parts
-```yaml
+```edg
 # Positional
-args:
-  - gen('firstname')
-  - gen('lastname')
-  - arg(0) + ' ' + arg(1)       # "Alice Smith"
+insert_person(type: exec) `INSERT INTO person (first, last, full) VALUES ($1, $2, $3)` (
+  gen('firstname'),
+  gen('lastname'),
+  arg(0) + ' ' + arg(1)       # "Alice Smith"
+)
 
 # Named (equivalent)
-args:
-  first: gen('firstname')
-  last: gen('lastname')
-  full: arg('first') + ' ' + arg('last')
+insert_person(type: exec) `INSERT INTO person (first, last, full) VALUES ($1, $2, $3)` (
+  first: gen('firstname'),
+  last:  gen('lastname'),
+  full:  arg('first') + ' ' + arg('last')
+)
 ```
 
 ### Weighted category selection
-```yaml
-args:
-  - set(['electronics', 'clothing', 'books', 'food'], [40, 30, 20, 10])
+```edg
+set(['electronics', 'clothing', 'books', 'food'], [40, 30, 20, 10])
 ```
 
 ### Hot-key access (Zipfian)
-```yaml
-args:
-  - zipf(2.0, 1.0, 999)  # value 0 is most frequent
+```edg
+zipf(2.0, 1.0, 999)  # value 0 is most frequent
 ```
 
 ### Hotspot rows (distribution-based ref)
-```yaml
-args:
-  - zipf.ref('fetch_ids', 2.0, 1.0).id        # heavy skew toward early rows
-  - pareto.ref('fetch_ids', 2.0).id            # continuous power-law, first rows dominate
-  - norm.ref('fetch_ids', 0.5, 0.2).id         # bell curve centered at midpoint
-  - exp.ref('fetch_ids', 1.5).id               # exponential decay from first row
-  - lognorm.ref('fetch_ids', 0.0, 0.5).id      # right-skewed access pattern
+```edg
+zipf.ref('fetch_ids', 2.0, 1.0).id      # heavy skew toward early rows
+pareto.ref('fetch_ids', 2.0).id         # continuous power-law, first rows dominate
+norm.ref('fetch_ids', 0.5, 0.2).id      # bell curve centered at midpoint
+exp.ref('fetch_ids', 1.5).id            # exponential decay from first row
+lognorm.ref('fetch_ids', 0.0, 0.5).id   # right-skewed access pattern
 ```
 
 ### Worker-pinned partition
-```yaml
-args:
-  - ref_perm('fetch_warehouses').w_id  # same warehouse for entire worker lifetime
+```edg
+ref_perm('fetch_warehouses').w_id  # same warehouse for entire worker lifetime
 ```
 
 ### Invoice line items (distribute_sum)
-```yaml
-args:
-  - uuid_v4()                           # invoice id
-  - uniform.float(100, 10000, 2)            # total
-  - distribute_sum(arg(1), 3, 7, 2)     # 3-7 amounts summing to total
-# SQL: unnest(string_to_array('$3', ',')::NUMERIC[])
+```edg
+insert_invoice(type: exec) `INSERT INTO invoice (id, total, amounts)
+  SELECT $1::UUID, $2::NUMERIC, unnest(string_to_array($3, ',')::NUMERIC[])` (
+    uuid_v4(),                       # invoice id
+    uniform.float(100, 10000, 2),    # total
+    distribute_sum(arg(1), 3, 7, 2)  # 3-7 amounts summing to total
+)
 ```
 
 ### Subtotal/tax/shipping breakdown (distribute_weighted)
-```yaml
-args:
-  - uniform.float(100, 10000, 2)                           # total
-  - distribute_weighted(arg(0), [85, 10, 5], 0.1, 2)   # ~85/10/5 split with 10% noise
-# SQL: split_part('$2', ',', 1)::NUMERIC  -- subtotal
-#      split_part('$2', ',', 2)::NUMERIC  -- tax
-#      split_part('$2', ',', 3)::NUMERIC  -- shipping
+```edg
+insert_order(type: exec) `INSERT INTO order_total (total, subtotal, tax, shipping)
+  VALUES (
+    $1::NUMERIC,
+    split_part($2, ',', 1)::NUMERIC,
+    split_part($2, ',', 2)::NUMERIC,
+    split_part($2, ',', 3)::NUMERIC
+  )` (
+    uniform.float(100, 10000, 2),                      # total
+    distribute_weighted(arg(0), [85, 10, 5], 0.1, 2)   # ~85/10/5 split with 10% noise
+)
 ```
 
 ### Masking PII
-```yaml
-args:
-  first_name: gen_locale('first_name', 'ja_JP')
-  last_name: gen_locale('last_name', 'ja_JP')
-  full_name: arg('last_name') + arg('first_name')
-  email: gen('email')
-  masked_name: mask(arg('full_name'))                # hex token
-  masked_email: mask(arg('email'), 'email', 4)       # ****@example.com
-  redacted_phone: mask(arg('phone'), 'redact')       # [REDACTED]
+```edg
+insert_customer(type: exec) `INSERT INTO customer (...) VALUES (...)` (
+  first_name:     gen_locale('first_name', 'ja_JP'),
+  last_name:      gen_locale('last_name', 'ja_JP'),
+  full_name:      arg('last_name') + arg('first_name'),
+  email:          gen('email'),
+  masked_name:    mask(env('MASK_KEY'), arg('full_name')),           # hex token
+  masked_email:   mask(env('MASK_KEY'), arg('email'), 'email', 4),   # ****@example.com
+  redacted_phone: mask(env('MASK_KEY'), arg('phone'), 'redact')      # [REDACTED]
+)
 ```
 
 ### Unique codes in batch inserts
-```yaml
+```edg
 # 200 airports each with a unique 3-char IATA code
-- name: populate_airport
-  type: exec_batch
-  count: 200
-  size: 100
-  args:
-    - iter()
-    - uniq("gen('airlineairportiata')")
-  query: |-
-    INSERT INTO airport (id, code) VALUES ($1::INT, $2)
+populate_airport(type: exec_batch, count: 200, size: 100) `INSERT INTO airport (id, code)
+  __values__` (
+    iter(),
+    uniq("gen('airlineairportiata')")
+)
 ```
 
 ### Composite uniqueness across columns
-```yaml
+```edg
 # 500 people with unique (first_name, last_name) pairs
-- name: populate_people
-  type: exec_batch
-  count: 500
-  size: 100
-  args:
-    - uniq("gen('first_name')", "gen('last_name')")[0]
-    - uniq("gen('first_name')", "gen('last_name')")[1]
-    - gen('email')
-  query: |-
-    INSERT INTO people (first_name, last_name, email) VALUES ($1, $2, $3)
+populate_people(type: exec_batch, count: 500, size: 100) `INSERT INTO people (first_name, last_name, email)
+  __values__` (
+    uniq("gen('firstname')", "gen('lastname')")[0],
+    uniq("gen('firstname')", "gen('lastname')")[1],
+    gen('email')
+)
 ```
 
 ### Real embeddings
-```yaml
+```edg
 # With generated data
-args:
-  - gen('productname')
-  - gen('sentence:3')
-  - embed(arg(0), arg(1))            # embed name + description
-query: |-
-  INSERT INTO product (name, description, embedding)
-  VALUES ($1, $2, $3::VECTOR)
+populate_product(type: exec) `INSERT INTO product (name, description, embedding)
+  VALUES ($1, $2, $3::VECTOR)` (
+    gen('productname'),
+    gen('sentence:3'),
+    embed(arg(0), arg(1))            # embed name + description
+)
 
 # With reference dataset (each product exactly once)
-args:
-  - ref_each(product_catalog).name
-  - ref_each(product_catalog).description
-  - embed(ref_each(product_catalog).name, ref_each(product_catalog).description)
-query: |-
-  INSERT INTO product (name, description, embedding)
-  VALUES ($1, $2, $3::VECTOR)
+populate_product(type: exec) `INSERT INTO product (name, description, embedding)
+  VALUES ($1, $2, $3::VECTOR)` (
+    ref_each(product_catalog).name,
+    ref_each(product_catalog).description,
+    embed(ref_each(product_catalog).name, ref_each(product_catalog).description)
+)
 ```
 
 Requires a license and `--embed-api-key` (or `EDG_EMBED_API_KEY`). Configure endpoint with `--embed-url`, model with `--embed-model`, dimensions with `--embed-dimensions`, max batch size with `--embed-max-batch`. Any OpenAI-compatible API works (Ollama, vLLM, etc.).
 
 ### Error handling with fail/fatal
-```yaml
-args:
-  # Stop worker if map lookup misses
-  - {'us': 'us-east-1', 'eu': 'eu-west-1'}[env('REGION')] ?? fail('unknown REGION')
+```edg
+# Stop worker if map lookup misses
+{'us': 'us-east-1', 'eu': 'eu-west-1'}[env('REGION')] ?? fail('unknown REGION')
 
-  # Kill entire process on critical misconfiguration
-  - fatal('missing required config')
+# Kill entire process on critical misconfiguration
+fatal('missing required config')
 ```
 
 `fail()` stops only the current worker; `fatal()` terminates the entire process.
@@ -498,7 +502,7 @@ args:
 
 Combine `global_iter()` with math functions to make generated data change shape over the life of a workload. Define `total_iters` as a global and estimate it from: `workers * duration_seconds / avg_latency_seconds`.
 
-```yaml
+```edg
 # Zipf skew drift: popularity concentrates over time
 zipf(initial_skew + (final_skew - initial_skew) * global_iter() / total_iters, 1, products - 1)
 
@@ -519,7 +523,7 @@ pow(cos(pi * mod(global_iter(), interval) / interval), 2.0) * 10.0
 
 - Use `edg repl` to test any expression interactively without a database
 - Expressions are compiled at startup; syntax errors will be caught immediately
-- `arg(index)` is zero-based and only works within the same query's args list; `arg('name')` works with named args (map-style `args:`)
+- `arg(index)` is zero-based and only works within the same query's args; `arg('name')` requires named args (`name: expr`)
 - Named and positional arg forms are mutually exclusive per query
 - `ref_same` resets between queries; `ref_perm` never resets
 - Set distributions accept expr-lang array literals: `['a', 'b', 'c']`
