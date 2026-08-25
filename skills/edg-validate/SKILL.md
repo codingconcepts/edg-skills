@@ -1,16 +1,16 @@
 ---
 name: edg-validate
-description: Validate an edg config file (YAML or DSL), interpret errors, and suggest fixes.
+description: Validate an edg config file (edg-lang), interpret errors, and suggest fixes.
 user-invocable: true
 ---
 
 # edg Config Validator
 
-You validate edg workload configurations (YAML or DSL) by running `edg validate` and interpreting the results.
+You validate edg workload configurations by running `edg validate` and interpreting the results.
 
 ## Steps
 
-1. **Identify the config file.** If the user specifies a path, use it. Otherwise, look for `.yaml`, `.yml`, or `.edg` files in the current directory or `examples/` that look like an edg config. The format is detected by file extension: `.edg` → DSL, `.yaml`/`.yml` → YAML.
+1. **Identify the config file.** If the user specifies a path, use it. Otherwise, look for `.edg` files in the current directory or `examples/`. edg-lang is the only config format; YAML support was removed.
 
 2. **Identify the driver.** If the user specifies a driver, use it. Otherwise, infer from the config content:
    - `STRING` type, `gen_random_uuid()`, `string_to_array`, `unnest` -> `pgx`
@@ -20,6 +20,8 @@ You validate edg workload configurations (YAML or DSL) by running `edg validate`
    - Note: `__values__` (without parentheses) is cross-driver and doesn't help identify the driver
    - `{"create":`, `{"insert":`, `{"find":`, `{"drop":` (JSON command syntax) -> `mongodb`
    - `CREATE KEYSPACE`, `KEYSPACE`, fully-qualified `ks.table` names -> `cassandra`
+   - `HSET`, `HGETALL`, `SADD`, `SCAN`, `UNLINK`, `EVAL`, `PING` (Redis commands, no SQL) -> `redis`
+   - `randomblob(`, `abs(random())`, `datetime('now')`, `AUTOINCREMENT`, `INSERT OR REPLACE`, `PRAGMA` -> `sqlite`
    - If unclear, default to `pgx`
 
 3. **Run validation:**
@@ -78,9 +80,11 @@ You validate edg workload configurations (YAML or DSL) by running `edg validate`
 | `rollback_if` outside transaction | `rollback_if` used in standalone run item | Move inside a transaction |
 | Mutually exclusive fields | Entry combines `if` + `match`, `if` + `rollback_if`, etc. | Use only one special field per entry |
 | Standalone `if`/`match` with `run_weights` | Conditional blocks cannot be weighted | Remove conditionals from weighted sections or remove `run_weights` |
+| `driver does not support prepared statements` | `prepared: true` on a mongodb, cassandra, or redis query | Remove `prepared: true`; those drivers have no prepare step |
+| `database is locked (5) (SQLITE_BUSY)` | Multiple SQLite writers with no busy timeout | Add pragmas to the URL: `file:edg.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)`, or run with `--pool-size 1` |
+| `database is locked (517)` | A deferred SQLite transaction read before it wrote and lost the lock upgrade; `busy_timeout` doesn't retry this | Add `&_txlock=immediate` to the URL so transactions begin as writers |
+| `ref: dataset "X" not found` (redis) | The producing query has `type: exec`, so its reply isn't stored | Set `type: query` on the query named `X` |
 | `X requires a license` | Feature (embeddings, completions, sync, scaffold, jobs, metrics) used without `--license` or `EDG_LICENSE` | Set `--license` flag or `EDG_LICENSE` env var with a valid pro license key |
 | `license does not include pro entitlement` | License key is valid but missing the pro entitlement | Upgrade license to include pro entitlement |
 | DSL parse error at line N col M: expected X, got Y | Syntax error in `.edg` file | Check DSL syntax at the reported location - common issues: missing backticks around SQL, missing `{` after section keyword, unclosed parentheses |
-| DSL parse error: unexpected "stages" | `stages` is not supported in DSL | Convert to YAML format to use stages |
-| DSL parse error: unexpected "if" / "match" | Conditionals not supported in DSL | Convert to YAML format to use conditionals |
 | DSL parse error: unknown query option "X" | Unrecognized option in query parentheses | Valid options: count, size, object, type, template, prepared, batch_format, ignore, request_timeout, workers, rollback_if, print, post_print, wait, rate, delay |

@@ -45,7 +45,7 @@ The output includes:
 
 ### Verify Uniform Distribution
 ```sh
-edg fuzz "uniform(1, 100)"
+edg fuzz "uniform.int(1, 100)"
 ```
 Expect: roughly equal bucket counts (~10% each).
 
@@ -59,7 +59,7 @@ Expect: `Nulls: ~1000 (10.0%)` with 10000 iterations.
 ```sh
 edg fuzz "zipf(1000, 2.0, 1.0)"    # heavy left skew
 edg fuzz "norm(0, 100, 50, 10)"     # bell curve
-edg fuzz "uniform(0, 100)"          # flat
+edg fuzz "uniform.int(0, 100)"          # flat
 ```
 
 ### Test with Config Context
