@@ -48,6 +48,7 @@ Match user request features to example directories:
 | Temporal patterns | `temporal_patterns/` |
 | Correlated signals | `correlated_signals/` |
 | Seasonal timestamps | `seasonal/`, `seasonal_cookbook/` |
+| Time compression (a day in 2 minutes) | `time_compression/` |
 | Interval-aligned timestamps | `timestamp_step/` |
 | Reusable arg templates | `objects/` |
 | Social / relational models | `social/` |
@@ -87,6 +88,9 @@ object customer {
     # or use a distribution: poisson.obj_n('item', 3), norm.obj_n('item', 5, 2, 1, 10), etc.
   }
 }
+
+# Time compression (run 24h of simulated time in 20m of wall clock)
+sim(period: '24h', in: '20m', from: '2024-01-01T00:00:00Z')
 
 # Signals (pre-computed buffers for correlated temporal patterns)
 signal traffic(from: '2024-01-01T00:00:00Z', to: '2024-01-08T00:00:00Z', interval: '5m') {
@@ -192,6 +196,7 @@ down { drop_users `DROP TABLE IF EXISTS users` }
 
 A complete edg DSL config (`.edg`) with all applicable sections:
 - `let` for shared constants (row counts, batch sizes, worker counts)
+- `sim` for compressing a simulated period into a shorter wall-clock run (optional, only when the run should stand for a longer stretch of time)
 - `signal` for pre-computed temporal signal buffers used across tables (optional, only for correlated temporal patterns)
 - `season` for weighted timestamp distributions (optional, only for seasonal or cyclical `created_at`-style columns)
 - `ref` for static lookup data (optional, only if needed)
@@ -210,6 +215,17 @@ A complete edg DSL config (`.edg`) with all applicable sections:
 - `down` for schema teardown (DROP TABLE statements)
 
 ## Rules
+
+### Block order
+Write top-level blocks in this order (what `edg fmt` produces, so a generated config is already canonical):
+
+```
+include, import, csv, sim, let, expr, seq / signal / season, ref, object, tree,
+template, complete, workers, up, seed, stages, weights, init, run, stats,
+deseed, down, expect
+```
+
+Repeats of the same block kind keep the order you write them in.
 
 ### Expectations
 - Use `expect` to assert benchmark results (exit code 1 on failure):
@@ -295,6 +311,8 @@ A complete edg DSL config (`.edg`) with all applicable sections:
 - `signal_correlated('name', lag, correlation)` for a correlated value with lag and noise. Lag can be an integer (iterations) or duration string (`'2h'`) if the signal was defined with `from`/`to`/`interval`. Correlation ranges from -1 to 1 (1.0 = exact copy, 0.0 = random noise around signal mean)
 - `season('name')` for an RFC3339 timestamp drawn from a named season's weighted distribution. Requires a license
 - `season_weight('name', ts)` for the season's intensity at a timestamp, normalised so the mean over the season's range is 1.0. Pass `arg('created_at')` to scale a row's other columns by the same season that produced its timestamp. Requires a license
+- `sim_time()` for the current simulated instant as an RFC3339Nano timestamp. Requires a `sim` block, a license, and the run phase
+- `sim_progress()` for how far through the run the simulated clock is, 0 to 1. Requires a `sim` block, a license, and the run phase
 - Math functions: `abs(x)`, `acos(x)`, `asin(x)`, `atan(x)`, `atan2(y,x)`, `ceil(x)`, `cos(x)`, `floor(x)`, `log(x)`, `log10(x)`, `mod(x,y)`, `pow(x,y)`, `sin(x)`, `sqrt(x)`, `tan(x)`, and `pi` constant. Use with `global_iter()` for temporal patterns like drift, seasonality, spikes, and saturation
 
 ### Correlated signals
@@ -364,6 +382,29 @@ A complete edg DSL config (`.edg`) with all applicable sections:
   ```
 - `arg('created_at')` reads the value already generated for this row, so the weight matches that row's own timestamp. Named args (`name: value`) are required for this, since `arg()` looks the value up by name
 - Check the scale of the weight before multiplying by it. Month, weekday, hour and a `mag: 12` spike stack up to a peak weight near 47, which turns a 2-item basket into a 30-item one. Damp it with `sqrt` and keep the raw weight in its own column if the correlation needs verifying
+
+### Time compression (licensed)
+- A season shapes *which* timestamps rows get; `sim` shapes *when the run itself happens*, binding pacing and data to one compressed clock. Use it when the run should stand for a longer stretch of time than it takes to execute:
+  ```edg
+  sim(period: '24h', in: '20m', from: '2024-01-01T00:00:00Z')
+  ```
+- The scale factor is `period / in` (72x above). Everything else stays written in real-world units and is read as *simulated* time: a stage with `duration: 6h` runs for 5 minutes, a worker with `rate: 1/1h` fires every 50 seconds
+- `from` is an optional RFC3339 anchor for the simulated clock; left off, it starts at the moment the run starts. There is one clock per run, so `sim` takes no name and a second declaration is an error
+- **Scaled**: `stages` `duration` / `ramp_duration` / `qps: ramp(..., d)`, query and `transaction` `wait`, `workers` `delay` and `rate`, and the `--duration` / `--warmup-duration` flags
+- **Not scaled**: `qps` values (a rate, not a duration, so the run keeps the declared *shape* at 1/factor of the volume), `stats` `rate` and per-query `stats_rate` (observability of a real run), `--request-timeout` / `--drain-timeout` / `--max-duration` (real database latency), and `signal` intervals / `season` ranges / `timestamp_steps`, which were already virtual
+- Use `sim_time()` to stamp rows with the simulated instant, which is what makes the *data* span the full period:
+  ```edg
+  run {
+    insert_event(type: exec)
+      `INSERT INTO events (ts, kind) VALUES ($1::TIMESTAMPTZ, $2)` (
+        sim_time(),
+        set(['view', 'add_to_cart', 'checkout'], [70, 20, 10])
+      )
+  }
+  ```
+- Both functions are run-phase only. `seed` has no total duration, so use `timestamp_steps` there instead
+- Compression has floors, and hitting one is an error rather than a silently degenerate run: a scaled duration under `1s` fails, and a scaled tick interval under `10ms` fails. Staged runs take their length from the stages and ignore `--duration`, so its `1m` default never trips the floor there
+- Don't hand-tune `mod(global_iter(), N)` to fake a daily cycle when `sim` is available: iteration-keyed patterns drift with database speed, `sim_time()` doesn't
 
 ### Global sequences
 - Declare a global sequence at the top level: `seq order_id(start: 1, step: 1)`

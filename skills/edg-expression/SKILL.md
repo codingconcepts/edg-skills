@@ -112,6 +112,8 @@ There is deliberately no `binomial.float`, `poisson.float` or `zipf.float` - tho
 | `duration(min, max)` | Random Go duration string |
 | `time(min, max)` | Random HH:MM:SS |
 | `timez(min, max)` | Random time of day with +00:00 timezone suffix |
+| `sim_time()` | Current simulated instant as RFC3339Nano (licensed; needs a `sim` block, run phase only) |
+| `sim_progress()` | How far through the run the simulated clock is, 0 to 1 (licensed; needs a `sim` block, run phase only) |
 
 ### Strings & Formatting
 | Function | Description |
@@ -518,6 +520,27 @@ pow(cos(pi * mod(global_iter(), interval) / interval), 2.0) * 10.0
 # Bounded drift: arctangent saturation (sensor calibration)
 100.0 + (2.0 * atan(sqrt(global_iter()) / 100.0) / pi) * 15.0 + norm.float(0, 0.5, -2, 2, 2)
 ```
+
+### Time-keyed patterns (sim_time + sim_progress)
+
+`global_iter()` is keyed on how many iterations you happen to complete, so the shape drifts with database speed and `total_iters` has to be estimated. With a `sim` block the clock is keyed on elapsed time instead, and no estimate is needed:
+
+```edg
+sim(period: '24h', in: '20m', from: '2024-01-01T00:00:00Z')
+```
+
+```edg
+# Timestamp a row with the simulated instant, so the data spans the full period
+sim_time()
+
+# Progress-driven drift, the direct replacement for global_iter() / total_iters
+zipf(initial_skew + (final_skew - initial_skew) * sim_progress(), 1, products - 1)
+
+# Ramp a value linearly over the simulated run
+base_price * (1.0 + 0.4 * sim_progress())
+```
+
+Both are Pro, run-phase only, and error without a `sim` block. `sim_time()` is RFC3339Nano rather than RFC3339 because at a high scale factor second precision would collapse a burst of concurrent inserts onto one timestamp.
 
 ## Debugging Tips
 
