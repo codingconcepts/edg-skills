@@ -74,7 +74,7 @@ Named args are required when another expression in the same query reads the valu
 | `exp(rate, min, max)` | Exponential decay |
 | `lognorm(mu, sigma, min, max)` | Right-skewed long tail |
 | `pareto(alpha, max)` | Continuous power-law, lower values dominate |
-| `pareto.float(alpha, min, max, precision)` | Continuous Pareto float in [min, max] (Pro) |
+| `pareto.float(alpha, min, max, precision)` | Continuous Pareto float in [min, max] |
 | `zipf(s, v, max)` | Power-law hot keys |
 | `nurand(A, x, y)` | TPC-C non-uniform random |
 | `rwalk(drift, volatility)` | Stateful random walk per worker (cumulative steps) |
@@ -83,7 +83,7 @@ Named args are required when another expression in the same query reads the valu
 
 All distributions also support `.obj_n` to generate N object instances with distribution-controlled count (e.g. `uniform.obj_n(...)`, `zipf.obj_n(...)`).
 
-Every distribution namespace except `uniform` requires a pro license; `(Pro)` marks these below.
+Every distribution namespace is free to use.
 
 There is deliberately no `binomial.float`, `poisson.float` or `zipf.float` - those distributions are integer-valued by definition. Use `beta.float` or `gamma.float` for a continuous skewed value.
 
@@ -112,8 +112,8 @@ There is deliberately no `binomial.float`, `poisson.float` or `zipf.float` - tho
 | `duration(min, max)` | Random Go duration string |
 | `time(min, max)` | Random HH:MM:SS |
 | `timez(min, max)` | Random time of day with +00:00 timezone suffix |
-| `sim_time()` | Current simulated instant as RFC3339Nano (licensed; needs a `sim` block, run phase only) |
-| `sim_progress()` | How far through the run the simulated clock is, 0 to 1 (licensed; needs a `sim` block, run phase only) |
+| `sim_time()` | Current simulated instant as RFC3339Nano (needs a `sim` block, run phase only) |
+| `sim_progress()` | How far through the run the simulated clock is, 0 to 1 (needs a `sim` block, run phase only) |
 
 ### Strings & Formatting
 | Function | Description |
@@ -131,9 +131,9 @@ There is deliberately no `binomial.float`, `poisson.float` or `zipf.float` - tho
 | `pareto.vector(dims, clusters, spread, alpha)` | vector literal with Pareto centroid selection |
 | `zipf.vector(dims, clusters, spread, s, v)` | vector literal with Zipfian centroid selection |
 | `norm.vector(dims, clusters, spread, mean, stddev)` | vector literal with normal centroid selection |
-| `exp.vector(dims, clusters, spread, rate)` | vector literal with exponential centroid selection (cluster 0 hottest) (Pro) |
-| `lognorm.vector(dims, clusters, spread, mu, sigma)` | vector literal with log-normal centroid selection (Pro) |
-| `embed(text...)` | Real vector embedding via external API (OpenAI-compatible). Variadic, joins args with space. Requires a license and `--embed-api-key` |
+| `exp.vector(dims, clusters, spread, rate)` | vector literal with exponential centroid selection (cluster 0 hottest) |
+| `lognorm.vector(dims, clusters, spread, mu, sigma)` | vector literal with log-normal centroid selection |
+| `embed(text...)` | Real vector embedding via external API (OpenAI-compatible). Variadic, joins args with space. Requires `--embed-api-key` |
 
 ### LLM / Structured Generation
 | Function | Description |
@@ -175,7 +175,7 @@ complete {
 }
 ```
 
-Requires a license and `--complete-api-key` (or `EDG_COMPLETE_API_KEY`). Configure endpoint with `--complete-url`, model with `--complete-model`. Any OpenAI-compatible API works (Ollama, vLLM, etc.).
+Requires `--complete-api-key` (or `EDG_COMPLETE_API_KEY`). Configure endpoint with `--complete-url`, model with `--complete-model`. Any OpenAI-compatible API works (Ollama, vLLM, etc.).
 
 ### Reference Data
 | Function | Scope | Description |
@@ -185,7 +185,7 @@ Requires a license and `--complete-api-key` (or `EDG_COMPLETE_API_KEY`). Configu
 | `ref_diff(name)` | Per-query | Unique row per call within one query |
 | `ref_perm(name)` | Per-worker | Fixed row for worker lifetime |
 | `ref_each(query_or_dataset)` | Expansion / Per-query | SQL string: one execution per returned row. Named dataset (unquoted): sequential iteration with same-row caching |
-| `ref_n(name, field, min, max)` | None | N unique values as CSV string |
+| `ref_n(name, field, min, max)` | None | N unique values as a list: index it (`[0]`) for one value, or pass it whole for a comma-separated value |
 | `norm.ref(name, mean, stddev)` | None | Row picked via normal distribution |
 | `exp.ref(name, rate)` | None | Row picked via exponential distribution |
 | `lognorm.ref(name, mu, sigma)` | None | Row picked via log-normal distribution |
@@ -213,8 +213,8 @@ Every aggregate (`sum`, `avg`, `min`, `max`, `median`, `stddev`, `variance`, `pe
 |---|---|
 | `arg(index)` | Reference earlier arg by zero-based index |
 | `arg('name')` | Reference earlier arg by name (named args only) |
-| `env(name)` | Value of environment variable (error if missing) |
-| `env_nil(name)` | Value of environment variable (nil if missing) |
+| `env(name)` | Job environment variable (`--env`/`--env-file`), falling back to the OS environment (error if missing) |
+| `env_nil(name)` | Job environment variable (`--env`/`--env-file`), falling back to the OS environment (nil if missing) |
 | `result()` | First row of current query's SELECT result (post_print only) |
 | `results()` | All rows of current query's SELECT result as []map (post_print only) |
 | `cond(pred, trueVal, falseVal)` | Ternary conditional (inline, for args) |
@@ -234,31 +234,41 @@ Conditional branching uses the same expr-lang expressions but at the config leve
 ### Correlated Totals
 | Function | Description |
 |---|---|
-| `distribute_sum(total, minN, maxN, precision)` | N random parts summing exactly to total (comma-separated) |
+| `distribute_sum(total, minN, maxN, precision)` | N random parts summing exactly to total, as a list (renders comma-separated) |
 | `distribute_weighted(total, weights, noise, precision)` | Split total by proportional weights with controlled noise (0=exact, 1=random) |
 
 ### Multi-Value
 | Function | Description |
 |---|---|
-| `nurand_n(A, x, y, minN, maxN)` | N unique NURand values (comma-separated) |
-| `weighted_sample_n(name, field, weightField, minN, maxN)` | N weighted unique rows from a dataset (comma-separated) |
+| `nurand_n(A, x, y, minN, maxN)` | N unique NURand values as a list (renders comma-separated) |
+| `weighted_sample_n(name, field, weightField, minN, maxN)` | N weighted unique rows from a dataset, as a list (renders comma-separated) |
 
-Every distribution namespace has a `.n` domain returning N unique picks as a comma-separated string. The last two args are always `minN, maxN`: a count is chosen uniformly in [minN, maxN] and that many distinct values are drawn. Typical use is unique item IDs for multi-item order lines (TPC-C New-Order).
+Every distribution namespace has a `.n` domain returning N unique picks as a list. The last two args are always `minN, maxN`: a count is chosen uniformly in [minN, maxN] and that many distinct values are drawn. Typical use is unique item IDs for multi-item order lines (TPC-C New-Order).
+
+A list used whole reaches the database comma-separated, so the SQL patterns that split it (`unnest(string_to_array(...))`, `JSON_TABLE`, `STRING_SPLIT`, `XMLTABLE`) still apply. To use single elements, index the list in the expression instead of splitting the string in SQL: `uniform.n(1, 1000, 2, 2)[0]`. `len(list)` gives the count and `string(list)` the comma-separated form. The same applies to `ref_n`, `weighted_sample_n`, `nurand_n`, `distribute_sum` and `distribute_weighted`:
+
+```edg
+transaction transfer {
+  let pair   = ref_n('fetch_accounts', 'id', 2, 2)
+  let source = local('pair')[0]
+  let target = local('pair')[1]
+}
+```
 
 | Function | Description |
 |---|---|
 | `uniform.n(min, max, minN, maxN)` | N unique uniform values |
-| `beta.n(alpha, beta, min, max, minN, maxN)` | N unique Beta-distributed values (Pro) |
-| `binomial.n(n, p, minN, maxN)` | N unique Binomial-distributed values (Pro) |
-| `empirical.n(samples, minN, maxN)` | N unique values sampled from an empirical CDF (Pro) |
-| `exp.n(rate, min, max, minN, maxN)` | N unique exponentially-distributed values (Pro) |
-| `gamma.n(shape, rate, min, max, minN, maxN)` | N unique Gamma-distributed values (Pro) |
-| `lognorm.n(mu, sigma, min, max, minN, maxN)` | N unique log-normally-distributed values (Pro) |
-| `norm.n(mean, stddev, min, max, minN, maxN)` | N unique normally-distributed values (Pro) |
-| `pareto.n(alpha, imax, minN, maxN)` | N unique Pareto-distributed values (Pro) |
-| `poisson.n(lambda, minN, maxN)` | N unique Poisson-distributed values (Pro) |
-| `weibull.n(shape, scale, min, max, minN, maxN)` | N unique Weibull-distributed values (Pro) |
-| `zipf.n(s, v, imax, minN, maxN)` | N unique Zipfian-distributed values (Pro) |
+| `beta.n(alpha, beta, min, max, minN, maxN)` | N unique Beta-distributed values |
+| `binomial.n(n, p, minN, maxN)` | N unique Binomial-distributed values |
+| `empirical.n(samples, minN, maxN)` | N unique values sampled from an empirical CDF |
+| `exp.n(rate, min, max, minN, maxN)` | N unique exponentially-distributed values |
+| `gamma.n(shape, rate, min, max, minN, maxN)` | N unique Gamma-distributed values |
+| `lognorm.n(mu, sigma, min, max, minN, maxN)` | N unique log-normally-distributed values |
+| `norm.n(mean, stddev, min, max, minN, maxN)` | N unique normally-distributed values |
+| `pareto.n(alpha, imax, minN, maxN)` | N unique Pareto-distributed values |
+| `poisson.n(lambda, minN, maxN)` | N unique Poisson-distributed values |
+| `weibull.n(shape, scale, min, max, minN, maxN)` | N unique Weibull-distributed values |
+| `zipf.n(s, v, imax, minN, maxN)` | N unique Zipfian-distributed values |
 
 Errors if `minN < 1`, if `maxN < minN`, or if N distinct values aren't found within 10,000 draws (i.e. the distribution's support is smaller than N).
 
@@ -278,12 +288,19 @@ Errors if `minN < 1`, if `maxN < minN`, or if N distinct values aren't found wit
 | `uniq(expr1, expr2, maxRetries)` | Composite with custom retry limit |
 | `uniq_across(pool, expr...)` | Cross-query uniqueness pool; values unique across all queries sharing same pool name. Pool persists for environment lifetime |
 | `uniq_across(pool, expr..., maxRetries)` | Cross-query pool with custom retry limit |
+| `uniq(array)` | De-duplicates a collection, keeping first-seen order; no retrying. An expression that produces a collection takes this form too, so `uniq(concat(tags, ['books']))` de-duplicates rather than redrawing |
+
+Quoted and unquoted spellings behave the same: `uniq("gen('email')")` and `uniq(gen('email'))` both redraw. A plain call would normally be evaluated before `uniq()` saw it, leaving nothing to redraw from, so the compiler quotes call-shaped arguments for you. Quoting explicitly is still the clearer spelling.
+
+What the compiler cannot fix: a bare literal (`uniq(500)`) or an identifier holding a non-expression value. An identifier is left alone deliberately - it may already hold the expression as a string, as in `uniq(email_expr)` where a global holds `"gen('email')"`. `edg doctor` reports the cases that remain.
+
+`uniq()`'s seen set covers one pass of arg evaluation. A batch query generates all its rows in one pass, so `uniq()` de-duplicates across the batch. A non-batch `run` query generates one row per iteration, so a lone `uniq()` call there compares against an empty set and can never reject a duplicate - use `uniq_across('pool', "expr")` for uniqueness across iterations. `edg doctor` reports this too.
 
 ### PII & Masking
 | Function | Description |
 |---|---|
-| `gen_locale('first_name', 'ja_JP')` | Locale-aware name/address/phone generation |
-| `gen_locale('name', 'de_DE')` | Full name in locale order (eastern = last+first, western = first last) |
+| `gen_locale('ja_JP', 'first_name')` | Locale-aware name/address/phone generation |
+| `gen_locale('de_DE', 'name')` | Full name in locale order (eastern = last+first, western = first last) |
 | `mask(key, value)` | Deterministic 16-char hex token, HMAC-keyed by `key` (same key + input -> same output) |
 | `mask(key, value, length)` | Hex token truncated to `length` chars |
 | `mask(key, value, 'base64')` | Base64-encoded token |
@@ -314,6 +331,7 @@ Supported locales: `en_US`, `ja_JP`, `de_DE`, `fr_FR`, `es_ES`, `pt_BR`, `zh_CN`
 | `atan2(y, x)` | Two-argument arc tangent (radians) |
 | `ceil(x)` | Smallest integer >= x |
 | `cos(x)` | Cosine (radians) |
+| `e` | Euler's number (2.71828...). Bare variable, not a call. Use `pow(e, x)` for exponentials |
 | `floor(x)` | Largest integer <= x |
 | `log(x)` | Natural logarithm |
 | `log10(x)` | Base-10 logarithm |
@@ -437,8 +455,8 @@ insert_order(type: exec) `INSERT INTO order_total (total, subtotal, tax, shippin
 ### Masking PII
 ```edg
 insert_customer(type: exec) `INSERT INTO customer (...) VALUES (...)` (
-  first_name:     gen_locale('first_name', 'ja_JP'),
-  last_name:      gen_locale('last_name', 'ja_JP'),
+  first_name:     gen_locale('ja_JP', 'first_name'),
+  last_name:      gen_locale('ja_JP', 'last_name'),
   full_name:      arg('last_name') + arg('first_name'),
   email:          gen('email'),
   masked_name:    mask(env('MASK_KEY'), arg('full_name')),           # hex token
@@ -487,7 +505,7 @@ populate_product(type: exec) `INSERT INTO product (name, description, embedding)
 )
 ```
 
-Requires a license and `--embed-api-key` (or `EDG_EMBED_API_KEY`). Configure endpoint with `--embed-url`, model with `--embed-model`, dimensions with `--embed-dimensions`, max batch size with `--embed-max-batch`. Any OpenAI-compatible API works (Ollama, vLLM, etc.).
+Requires `--embed-api-key` (or `EDG_EMBED_API_KEY`). Configure endpoint with `--embed-url`, model with `--embed-model`, dimensions with `--embed-dimensions`, max batch size with `--embed-max-batch`. Any OpenAI-compatible API works (Ollama, vLLM, etc.).
 
 ### Error handling with fail/fatal
 ```edg
@@ -540,7 +558,7 @@ zipf(initial_skew + (final_skew - initial_skew) * sim_progress(), 1, products - 
 base_price * (1.0 + 0.4 * sim_progress())
 ```
 
-Both are Pro, run-phase only, and error without a `sim` block. `sim_time()` is RFC3339Nano rather than RFC3339 because at a high scale factor second precision would collapse a burst of concurrent inserts onto one timestamp.
+Both are run-phase only and error without a `sim` block. `sim_time()` is RFC3339Nano rather than RFC3339 because at a high scale factor second precision would collapse a burst of concurrent inserts onto one timestamp.
 
 ## Debugging Tips
 
