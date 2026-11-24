@@ -16,7 +16,7 @@ The user will describe:
 - The target database driver (pgx, mysql, mssql, oracle, dsql, spanner, mongodb, cassandra, sqlite, redis, test)
 - Any specific data distribution requirements (hot keys, skewed access, etc.)
 
-If the user does not specify a driver, default to `pgx`.
+If the user doesn't specify a driver, default to `pgx`.
 
 ## Workflow
 
@@ -62,6 +62,7 @@ Match user request features to example directories:
 | Print / live stats | `print/` |
 | Sync pairs | `sync/` |
 | Compare benchmarks | `compare/` |
+| Groups of workloads across several databases | `nested_targets/` |
 | Distributed cluster | `cluster/` |
 | Vectors / embeddings | `vector/`, `embed/` |
 | LLM structured generation | `llm/` |
@@ -216,7 +217,7 @@ A complete edg DSL config (`.edg`) with all applicable sections:
 - `seed` for data population (bulk INSERTs, use `count`/`size` options for large volumes)
 - `init` for fetching reference data needed by `run` queries
 - `run` for the transactional workload (the queries that will be benchmarked)
-- `weights` for weighted query selection (optional, only if multiple run queries). Once the block exists it is the whole selection list: a run item missing from it, or given a weight of zero, never executes. List every run query you want to run, or omit the block entirely and they each run in turn
+- `weights` for weighted query selection (optional, only if multiple run queries). Once the block exists it's the whole selection list: a run item missing from it, or given a weight of zero, never executes. List every run query you want to run, or omit the block entirely and they each run in turn
 - `workers` for background queries that run on a fixed schedule alongside the main workload (optional)
 - `stats` for periodic observability queries that run at a fixed rate, independent of run weights (optional)
 - `junction` inside `seed` or `run` blocks for many-to-many junction tables with cardinality control (optional)
@@ -245,18 +246,32 @@ Repeats of the same block kind keep the order you write them in.
   ```
 - `url` is required and must resolve to a non-empty string. `driver` is optional and falls back to `--driver`
 - `url` and `driver` are **expressions, not bare text**, so string literals must be quoted: `url: 'postgres://localhost:26257/defaultdb'`, never `url: postgres://localhost:26257/defaultdb`
-- Prefer `env()` over hardcoded URLs. Pointing a target at its database from the environment is the whole reason the options are expressions, and it is what keeps a multi-target config portable
-- Targets resolve before any connection opens, so `env()`, `let` globals and arithmetic work. Anything needing a live database does not, and neither do `expr` functions
+- Prefer `env()` over hardcoded URLs. Pointing a target at its database from the environment is the whole reason the options are expressions, and it's what keeps a multi-target config portable
+- Targets resolve before any connection opens, so `env()`, `let` globals and arithmetic work. Anything needing a live database doesn't, and neither do `expr` functions
 - `config` points a target at its own workload file, which is how one run drives databases needing different dialects:
   ```edg
   target postgres(url: env('PG_URL'),  driver: 'pgx',    config: 'postgres.edg')
   target oracle(  url: env('ORA_URL'), driver: 'oracle', config: 'oracle.edg')
   ```
 - `config` is a **quoted path, never an expression** - unlike its siblings. Relative to the declaring config, or absolute; it may point outside that directory. Give the files matching query names so the TUI lines their results up
-- A target's config file is an ordinary config: it declares no targets of its own (that is an error), and still runs standalone against `--url`
+- A target's config file is usually an ordinary workload config: it declares no targets of its own, and still runs standalone against `--url`
+- A target's config **may** declare targets of its own, making it a manifest: the target naming it's replaced by every target that manifest declares, to any depth. Use it when one run drives several groups of workloads, and keep each level runnable on its own:
+  ```edg
+  # all.edg
+  target cockroach(url: env('CRDB_URL'), driver: 'pgx', config: 'group.edg')
+  target postgres(url: env('POSTGRES_URL'), driver: 'pgx', config: 'group.edg')
+
+  # group.edg
+  target oltp(config: 'oltp.edg')
+  target olap(config: 'olap.edg')
+  ```
+- A nested target is named for the path that reached it, joined with `.` - `cockroach.oltp`, `postgres.olap`. That's what `--target` matches and what labels its metrics, so two groups may reuse a leaf name
+- A nested target inherits the `url` and `driver` of the target that pointed at its manifest, and overrides either by naming its own. One naming no `config` runs the manifest's own workload
+- `url` is required unless `config` is given. A target with neither is a parse error; a target with no `url` whose config turns out to be a workload rather than a manifest fails when the run resolves its targets
+- A target's options are evaluated in the scope they were written in: the globals of the file declaring it, over those of the manifests above it. A manifest chain that leads back to itself is an error naming the chain
 - A target without `config` runs the workload declared alongside it, so the two styles mix. Two targets may name the same file, which is how you compare same-dialect databases
 - A target with no `config` and no workload to inherit is an error. A declaring config whose workload no target runs is only a warning, so commenting a target out never fails the rest
-- Declaring one target does not change how the run executes; it just names the single stream so metrics and output say which database they came from. Declaring two or more runs them concurrently, one connection and one workload stream each
+- Declaring one target doesn't change how the run executes; it just names the single stream so metrics and output say which database they came from. Declaring two or more runs them concurrently, one connection and one workload stream each
 - `up`, `seed`, `deseed`, `reseed`, `down` and `run` all drive **every** declared target, concurrently, reporting each failure against its target. `--target` narrows any of them to one, workload included
 - `--url` is ignored once a config declares targets
 - `--max-queries`, `--max-qps` and `--max-rows` apply per target, not across the run
@@ -305,11 +320,12 @@ Repeats of the same block kind keep the order you write them in.
   - `dup` - columns generated through `uniq()` / `uniq_across()`. Breaks a unique index. Replays an already-emitted value, so the collision is guaranteed.
   - `fk_break` - columns generated through `ref()`, `ref_each()`, `ref_diff()`, `ref_perm()`, `ref_same()`, `ref_weighted()` or `<dist>.ref()`. Breaks a foreign key.
   - `range` - columns whose value is numeric at run time. Breaks a `CHECK`.
-- Aiming a kind at a column it cannot act on is a config error, not a silent skip. Each kind may be declared once per target.
-- Set exactly one of `rate` (share of operations, `(0, 1]`) or `count` (exact number of operations). `%` is not valid - it is the modulo operator. Use `count` for constraint probes, `rate` for soak runs.
+- Aiming a kind at a column it can't act on is a config error, not a silent skip. Each kind may be declared once per target.
+- Set exactly one of `rate` (share of operations, `(0, 1]`) or `count` (exact number of operations). `%` isn't valid - it's the modulo operator. Use `count` for constraint probes, `rate` for soak runs.
 - `expect: fail` (default) passes when the database refuses every row and fails when any row lands - a landed row means the constraint is missing. `expect: pass` is the reverse, for unconstrained targets.
 - Every mutation reports its own verdict and exits non-zero on failure, with or without an `expect` block. A mutation that never fired also fails: a check that didn't happen shouldn't look like one that passed.
-- Flags replace the config's block for one run: `--mutate 'null:insert_user.email,rate=0.01'`, `--mutate-random 5` (with `--rng-seed` for reproducibility), `--no-mutate`.
+- Mutations are opt-in. A config's `mutate` block is ignored unless the run passes `--mutate`, so an ordinary run stays clean.
+- `--mutate-spec 'null:insert_user.email,rate=0.01'` (repeatable) and `--mutate-random 5` (with `--rng-seed` for reproducibility) are opt-in on their own and replace the config's block for that run. They're mutually exclusive.
 
 ### Query types
 - Use `type: exec` for INSERT, UPDATE, DELETE, TRUNCATE, DROP, CREATE
@@ -325,7 +341,7 @@ Repeats of the same block kind keep the order you write them in.
 - `uuid_v7()` for sortable primary keys
 - `ulid()` for a sortable 26-char Crockford base32 ID (alphabet `0123456789ABCDEFGHJKMNPQRSTVWXYZ`, no I/L/O/U). 48-bit millisecond timestamp + 80 random bits, so IDs sort in creation order. The random suffix is reproducible under `--seed`
 - `gen('pattern')` for fake data using gofakeit patterns (e.g., `gen('email')`, `gen('firstname')`, `gen('number:1,100')`)
-- `regex('pattern')` for random strings matching a regex
+- `regex('pattern')` for random strings matching a regex. RE2 syntax, so no lookarounds or backreferences. `*`, `+` and `{n,}` generate at most 10 repetitions; an explicit `{n,m}` is honoured as written, so prefer `[a-z]{5,12}` over `[a-z]+` when the length matters. Anchors (`^`, `$`, `\b`) are ignored. An unparseable pattern fails validation rather than generating
 - `uniform.int(min, max)` / `uniform.float(min, max, precision)` for uniform random numbers
 - `norm(mean, stddev, min, max)` / `norm.float(mean, stddev, min, max, precision)` for normal distribution
 - `zipf(s, v, max)` for hot-key / power-law workloads
@@ -340,11 +356,13 @@ Repeats of the same block kind keep the order you write them in.
 - `empirical(samples)` / `empirical_f(samples, precision)` for sampling from observed data via CDF interpolation
 - Every distribution namespace has a `.n` domain returning N unique picks as a list. Index it (`uniform.n(1, 1000, 2, 2)[0]`) for one value, or pass it whole and it renders comma-separated. The last two args are always `minN, maxN`: a count is chosen uniformly in `[minN, maxN]` and that many distinct values are drawn. Typical use is unique item IDs for multi-item order lines (TPC-C New-Order):
   `uniform.n(min, max, minN, maxN)`, `beta.n(alpha, beta, min, max, minN, maxN)`, `binomial.n(n, p, minN, maxN)`, `empirical.n(samples, minN, maxN)`, `exp.n(rate, min, max, minN, maxN)`, `gamma.n(shape, rate, min, max, minN, maxN)`, `lognorm.n(mu, sigma, min, max, minN, maxN)`, `norm.n(mean, stddev, min, max, minN, maxN)`, `pareto.n(alpha, imax, minN, maxN)`, `poisson.n(lambda, minN, maxN)`, `weibull.n(shape, scale, min, max, minN, maxN)`, `zipf.n(s, v, imax, minN, maxN)`
-- `.n` errors if `minN < 1`, if `maxN < minN`, or if N distinct values are not found within 10,000 draws (i.e. the distribution's support is smaller than N)
+- `.n` errors if `minN < 1`, if `maxN < minN`, or if N distinct values aren't found within 10,000 draws (i.e. the distribution's support is smaller than N)
 - There is deliberately no `binomial.float`, `poisson.float` or `zipf.float` - those distributions are integer-valued by definition. Use `beta.float` or `gamma.float` for a continuous skewed value
 - `geo_distance(lat1, lon1, lat2, lon2)` for great-circle distance in kilometres (haversine, earth radius 6371 km). e.g. `geo_distance(51.5074, -0.1278, 48.8566, 2.3522)` -> ~343.5
 - `geo_bearing(lat1, lon1, lat2, lon2)` for initial compass bearing in degrees, range `[0, 360)`. 0=north, 90=east, 180=south, 270=west
-- `markov(states, matrix)` for stateful Markov chain with transition probabilities (per-worker state)
+- `markov_chain(group, states, matrix)` for stateful Markov chain with transition probabilities (per-worker state)
+- `markov_string(source, order, min_len, max_len)` for a new string learned from existing ones. `source` is a list, a `dataset.field` from an init query, or a gofakeit `category.key` list (e.g. `person.first`, `address.city`). `order` defaults to 2, `min_len` to 3, `max_len` to 12. Never returns a training word. The chain is trained once per run, so keep the arguments constant across rows
+- A markov chain has a finite vocabulary, and raising `order` shrinks it, because more of what it produces is a training word and training words are rejected. Variety in the training data matters more than volume: eight words sharing a first letter yield 1 usable output at order 2, where 19 words across three families yield 45. `edg doctor` counts the vocabulary exactly for inline and gofakeit sources and warns when it falls short of a seed `count`; wrapping too narrow a chain in `uniq()`/`uniq_across()` is a config error, not a warning, because uniq() fails the query once the chain runs out
 - `mvnorm(index, means, stddevs, correlations)` for correlated multivariate normal across columns (per-row caching)
 - `rwalk(drift, volatility)` / `rwalk_f(drift, volatility, precision)` for stateful random walk / Brownian motion (per-worker cumulative)
 - `timestamp(min, max)` for random timestamps
@@ -400,7 +418,7 @@ Repeats of the same block kind keep the order you write them in.
   ```
 
 ### Bundled shapes
-- edg ships with ten load shapes, usable without declaring anything. They are named with an `edg-` prefix, which no declared signal can collide with because identifiers cannot contain a hyphen:
+- edg ships with ten load shapes, usable without declaring anything. They're named with an `edg-` prefix, which no declared signal can collide with because identifiers can't contain a hyphen:
   ```edg
   stages {
     soak(workers: 16, duration: 10m, qps: signal('edg-ramp-hold', peak: 2000))
@@ -421,11 +439,11 @@ Repeats of the same block kind keep the order you write them in.
   | `edg-backlog` | Builds up twelve times over, each time dropping to nothing. Queue catch-up |
   | `edg-outage` | Steady, then almost nothing, then a catch-up surge. Recovery and retry storms |
 
-- `peak` maps a shape's tallest point to that QPS and scales the rest, so `peak` is not always the load seen most of the time: `edg-spike` sits at a fifth of `peak` outside its burst, `edg-outage` at half either side of its surge, and `edg-batch` at a tenth in the gaps. Size `peak` against the part of the curve the user cares about
-- A bundled shape declares points but no interval, so its length is resolution rather than duration: the curve stretches across the whole run however long that is. It knows where it is in the run, not what time it is
+- `peak` maps a shape's tallest point to that QPS and scales the rest, so `peak` isn't always the load seen most of the time: `edg-spike` sits at a fifth of `peak` outside its burst, `edg-outage` at half either side of its surge, and `edg-batch` at a tenth in the gaps. Size `peak` against the part of the curve the user cares about
+- A bundled shape declares points but no interval, so its length is resolution rather than duration: the curve stretches across the whole run however long that is. It knows where it's in the run, not what time it's
 - The shapes take no options. To change one - step count, burst width, a window anchored to real timestamps - print it and edit the declaration: `edg signals --show edg-staircase [--length N]` emits a `signal name(length: N) { ... }` block that behaves identically to the built-in until changed. Swap `length` for `from`/`to`/`interval` to anchor it to a `sim` clock
 - `edg signals [search]` lists them with what `peak` means for each
-- Suggest `edg signal explore [shape]` when the user is deriving a curve rather than drawing one: it plots the expression as it is typed, re-evaluating against the same evaluator a run uses, and exports `signal name(length: N) { expr }` on `enter`. Naming a bundled shape starts from its expression, which is the quickest way to tweak one and see what the tweak did. Flags are `--name` (default `traffic`) and `--length` (default `288`)
+- Suggest `edg signal explore [shape]` when the user is deriving a curve rather than drawing one: it plots the expression as it's typed, re-evaluating against the same evaluator a run uses, and exports `signal name(length: N) { expr }` on `enter`. Naming a bundled shape starts from its expression, which is the quickest way to tweak one and see what the tweak did. Flags are `--name` (default `traffic`) and `--length` (default `288`)
 - Bundled shapes compose like any other signal: `signal_at('edg-business-hours', i)` inside a declared signal's body
 
 ### Seasons
@@ -448,7 +466,7 @@ Repeats of the same block kind keep the order you write them in.
 - `recency` biases toward `to` with an exponential half-life; a spike peaks at `mag` on `at` and tapers linearly back to 1 over `width` either side, so `width` is the half-width. A `mag` below 1 is a lull, which is the cleanest way to model a holiday shutdown or an outage
 - `weight` is an arbitrary expression evaluated per bucket with `t`, `year`, `month`, `day`, `yearday`, `weekday` and `hour` in scope
 - The bucket must be at least as fine as the finest declared term: `hours` and `business_hours` need `1h` or finer, `spikes` the narrowest spike width. edg errors if the bucket is too coarse for those
-- **A `weight` expression does not drive the default bucket**, because edg can't see inside it. A season whose only term is a `weight` that reads `hour` gets the `24h` default, is sampled at midnight where `hour` is always 0, and silently produces the wrong shape. Set `bucket: '1h'` explicitly whenever `weight` reads `hour`
+- **A `weight` expression doesn't drive the default bucket**, because edg can't see inside it. A season whose only term is a `weight` that reads `hour` gets the `24h` default, is sampled at midnight where `hour` is always 0, and silently produces the wrong shape. Set `bucket: '1h'` explicitly whenever `weight` reads `hour`
 - Common shapes, all in `seasonal_cookbook/`:
   - Quiet weekends: `weekdays = [0.3, 1, 1, 1, 1, 1, 0.3]`
   - Office hours: `business_hours = { from: 9, to: 17, off: 0.05 }`
@@ -539,7 +557,7 @@ Repeats of the same block kind keep the order you write them in.
 - Every aggregate (`sum`, `avg`, `min`, `max`, `median`, `stddev`, `variance`, `percentile`) also accepts a single-array form as well as `(dataset, field)`: `sum([1, 2, 3])`, `median(prices)`, `stddev(prices)`, `percentile(prices, 95)`. For `percentile` the `p` is always the last arg, so the array form takes 2 args and the dataset form takes 3. Non-numeric elements in an array are skipped. Empty input returns 0, including for `min`/`max`
 - Distribution-based ref functions pick rows using statistical distributions: `zipf.ref(name, s, v)`, `pareto.ref(name, alpha)`, `norm.ref(name, mean, stddev)`, `exp.ref(name, rate)`, `lognorm.ref(name, mu, sigma)`, `beta.ref(name, alpha, beta)`, `gamma.ref(name, shape, rate)`, `weibull.ref(name, shape, scale)`, `poisson.ref(name, lambda)`, `binomial.ref(name, n, p)`, `empirical.ref(name, samples)`
 - `each(values)` for deterministic cycling through an inline list (no randomness). Row 0 → first item, row 1 → second, wraps via modulo. Use with `count: len(values)` for exact enum seeding: `each(['admin', 'user', 'guest'])`
-- Distribution-based set functions pick from a predefined array: `set(values, weights)`, `zipf.set(values, s, v)`, `pareto.set(values, alpha)`, `norm.set(values, mean, stddev)`, `exp.set(values, rate)`, `lognorm.set(values, mu, sigma)`, `beta.set(values, alpha, beta)`, `gamma.set(values, shape, rate)`, `weibull.set(values, shape, scale)`, `poisson.set(values, lambda)`, `binomial.set(values, n, p)`, `empirical.set(values, samples)`
+- Distribution-based set functions pick from a predefined array: `set(values[, weights])`, `zipf.set(values, s, v)`, `pareto.set(values, alpha)`, `norm.set(values, mean, stddev)`, `exp.set(values, rate)`, `lognorm.set(values, mu, sigma)`, `beta.set(values, alpha, beta)`, `gamma.set(values, shape, rate)`, `weibull.set(values, shape, scale)`, `poisson.set(values, lambda)`, `binomial.set(values, n, p)`, `empirical.set(values, samples)`
 
 ### Correlated totals
 - `distribute_sum(total, minN, maxN, precision)` partitions a total into N random parts, as a list, that sum exactly to it. Pass it whole and use SQL `unnest`/`string_to_array` (pgx) or `JSON_TABLE` (MySQL) to expand into rows
@@ -577,7 +595,7 @@ Repeats of the same block kind keep the order you write them in.
   populate_employees(count: 10000, size: 1000)
     `INSERT INTO employees (department, salary) __values__`
     (
-      department: set(['Engineering', 'Support', 'Sales'], []),
+      department: set(['Engineering', 'Support', 'Sales']),
       salary: norm.float(50000, 10000, 10000, 100000, 2)
         * ({'Engineering': 1.3, 'Support': 0.8}[string(department)] ?? 1.0),
     )
@@ -587,7 +605,7 @@ Repeats of the same block kind keep the order you write them in.
 - Prefer `mvnorm` when columns should be drawn from a joint distribution rather than derived by arithmetic from one another
 - `cond(predicate, trueVal, falseVal)` for conditional values
 - `nullable(expr, probability)` for nullable columns
-- `bool()` + `arg()` + `cond()` for mutually exclusive columns
+- `bool()` + `arg()` + `cond()` for mutually exclusive columns, and a type column + `arg()` + `cond()` for polymorphic associations (see below)
 
 ### Named args
 - Args can be a map instead of a list, giving each arg a name:
@@ -661,14 +679,14 @@ Repeats of the same block kind keep the order you write them in.
 ### Batch operations
 - For seed operations with large row counts, use `exec_batch` with `count` (total rows) and `size` (rows per batch)
 - Use `gen_batch(total, batchSize, pattern)` for generating batched values
-- Use `batch(n)` for sequential indices. Do not write `batch(total / size)`: expr-lang divides as floats and the batch count truncates, so a total that is not a multiple of size silently seeds fewer rows than asked for. Prefer `count`/`size` on an `exec_batch` query, which trims the last batch to the remainder; where the index drives server-side `LIMIT`/`OFFSET` pagination, use `batch(ceil(total / size))`
+- Use `batch(n)` for sequential indices. Don't write `batch(total / size)`: expr-lang divides as floats and the batch count truncates, so a total that's not a multiple of size silently seeds fewer rows than asked for. Prefer `count`/`size` on an `exec_batch` query, which trims the last batch to the remainder; where the index drives server-side `LIMIT`/`OFFSET` pagination, use `batch(ceil(total / size))`
 - Use `ref_each('SQL')` to seed a child table from every row of a parent, instead of hand-rolled `LIMIT`/`OFFSET` pagination. The SQL form yields the selected values directly and takes no `.field` suffix (`ref_each('SELECT id FROM customer')`); pass a dataset as a bare name to get rows (`ref_each(fetch_customers).id`)
 - Use `ref_cursor(query, size, cursor_col, repeat?)` for keyset-paginated iteration over large tables. Pages through results using `WHERE cursor_col > last_value ORDER BY cursor_col LIMIT size`, fetching one page at a time with constant memory. Works with `__values__` for multi-row INSERTs. Ideal when `ref_each()` would load too many rows into memory (e.g. 10M+ rows). Optional `repeat` count gives exact cardinality: each row is returned N times before advancing. Examples: `ref_cursor('SELECT id FROM customer ORDER BY id', 1000, 'id')`, `ref_cursor('SELECT id FROM customer ORDER BY id', 1000, 'id', 3)` (3 children per customer)
 - Use `iter()` for a 1-based row counter within batch queries (resets per query)
 - Use `uniq("expression")` to retry a generator until a unique value is produced (e.g., `uniq("gen('airlineairportiata')")` for unique IATA codes). Defaults to 100 retries; override with `uniq("expression", 500)`. The unquoted form `uniq(gen('email'))` works too - the compiler quotes call-shaped arguments - but quoting is the clearer spelling
 - For composite uniqueness across columns, pass multiple expressions: `uniq("gen('firstname')", "gen('lastname')")[0]` and `...[1]`. Returns `[]any`; same-row calls with identical expressions return cached tuple
 - Use `uniq_across('pool_name', "expression")` for cross-query uniqueness. Unlike `uniq()`, whose seen set covers only one pass of arg evaluation (the whole batch for a batch query, a single row for a non-batch `run` query), `uniq_across` shares a named pool that persists across all queries. In a non-batch `run` query `uniq_across` is the only form that de-duplicates across iterations. Use when values must be globally unique across tables (e.g., `uniq_across('emails', "gen('email')")` in both `users` and `admins` seeds). Supports composite tuples: `uniq_across('names', "gen('firstname')", "gen('lastname')")`, which is how to feed a compound `UNIQUE (a, b)` index - the pair is what must be unique, so the individual columns are free to repeat. The pool is shared by every worker in the run, so give the expression's range ~10% more values than the rows drawn from it, or the retries will start failing
-- **`__values__` token (recommended)**: Use `__values__` in the query to generate a multi-row `VALUES` clause instead of driver-specific batch expansion (`unnest`/`JSON_TABLE`/`OPENJSON`). Produces `VALUES (v1, v2), (v3, v4), ...` - one INSERT per batch. Works with `exec_batch`/`query_batch` and also with `type: exec`/`query` when using batch-expanding args (`gen_batch()`, `batch()`, `ref_each()`, `ref_cursor()`). Works with pgx, mysql, mssql, spanner, sqlite, dsql. For Oracle, use `__values__(table(col1, col2))` to generate `INSERT ALL INTO table (cols) VALUES (...) ... SELECT 1 FROM DUAL`. Does not work with MongoDB, Cassandra, or Redis. Also supports upsert (`ON CONFLICT`/`ON DUPLICATE KEY`/`MERGE`) and update via CTE
+- **`__values__` token (recommended)**: Use `__values__` in the query to generate a multi-row `VALUES` clause instead of driver-specific batch expansion (`unnest`/`JSON_TABLE`/`OPENJSON`). Produces `VALUES (v1, v2), (v3, v4), ...` - one INSERT per batch. Works with `exec_batch`/`query_batch` and also with `type: exec`/`query` when using batch-expanding args (`gen_batch()`, `batch()`, `ref_each()`, `ref_cursor()`). Works with pgx, mysql, mssql, spanner, sqlite, dsql. For Oracle, use `__values__(table(col1, col2))` to generate `INSERT ALL INTO table (cols) VALUES (...) ... SELECT 1 FROM DUAL`. Doesn't work with MongoDB, Cassandra, or Redis. Also supports upsert (`ON CONFLICT`/`ON DUPLICATE KEY`/`MERGE`) and update via CTE
 
 ### Trees (hierarchical and graph data)
 - A `tree` block expands into one `seed` query per level (`{name}_level_{n}`), wiring each level's parent reference to the level above. Use it for org charts, category trees, nested comments, dependency graphs
@@ -688,6 +706,33 @@ Repeats of the same block kind keep the order you write them in.
   ```
 - Write the returning clause yourself - edg never parses the SQL to find one, because drivers differ (`RETURNING` on pgx, `OUTPUT INSERTED` on mssql, unsupported on mysql). edg validates the rows that come back instead, and fails at the level whose statement returned nothing or omitted the `id_column`
 - `type: query` levels run single-worker; client-generated trees keep full batch parallelism
+
+### Polymorphic associations (STI / MTI)
+- A child row whose parent can live in more than one table, with a type column (discriminator) saying which. No dedicated syntax: generate the type first, then branch every dependent column on it with `cond()` and `arg('type_column')`. The branch reads the value already generated for the row, so type and foreign key can never disagree
+- **STI** is one `*_type` plus one `*_id` column. The database can't enforce a foreign key, so index `(type, id)` for lookups:
+  ```edg
+  populate_comment(type: exec_batch, count: comments, size: batch_size)
+    `INSERT INTO comment (commentable_type, commentable_id, body)
+     __values__` (
+    commentable_type: uniform.set(['post', 'video'], [70, 30]),
+    commentable_id: cond(arg('commentable_type') == 'post', ref('populate_post').id, ref('populate_video').id),
+    body: gen('loremipsumsentence:12')
+  )
+  ```
+- **MTI** is one `*_type` plus one nullable foreign key per parent. `nil` reaches the database as `NULL`, and a CHECK constraint enforces the exclusive arc:
+  ```edg
+  populate_reaction(type: exec_batch, count: reactions, size: batch_size)
+    `INSERT INTO reaction (target_type, post_id, video_id)
+     __values__` (
+    target_type: uniform.set(['post', 'video'], [70, 30]),
+    post_id: cond(arg('target_type') == 'post', ref('populate_post').id, nil),
+    video_id: cond(arg('target_type') == 'video', ref('populate_video').id, nil)
+  )
+  ```
+- Weights on the type set the parent mix directly (70% posts here), independent of how many rows each parent table holds. A `UNION ALL` over both parents would tie the mix to row counts instead
+- For three or more parents, nest the `cond()` calls and extend the weights
+- `ref('populate_post')` reads the rows an earlier seed query generated, so parents need no `SELECT` round-trip. Seed the parents before the children
+- Never call `ref()` twice for the same parent within a row: each call picks a fresh row, so the columns disagree. Reuse the value already generated with `arg('column_name')`
 
 ### Transactions
 - Group related `run` queries into an explicit `BEGIN/COMMIT` block using `transaction`:
@@ -729,10 +774,10 @@ Repeats of the same block kind keep the order you write them in.
 - Bindings evaluate in declaration order, so later bindings can reference earlier ones
 - Each row gets its own evaluation - `ref`/`ref_weighted` returns a fresh row per data row
 - Ref objects with array properties (e.g. `hour_weights: [2, 1, 1, ...]`) can be accessed via dot notation: `local('city').hour_weights`
-- Conditional rollbacks are not errors, the worker continues to the next iteration
+- Conditional rollbacks aren't errors, the worker continues to the next iteration
 - Multiple `rollback_if` elements can be placed at different points in the transaction
-- Batch types (`exec_batch`, `query_batch`) cannot be used inside a transaction
-- `prepared: true` cannot be used inside a transaction
+- Batch types (`exec_batch`, `query_batch`) can't be used inside a transaction
+- `prepared: true` can't be used inside a transaction
 - Transactions appear in a separate TRANSACTION stats section (with COMMITS, ROLLBACKS, ERRORS columns)
 - Use `weights` to weight transactions against standalone queries (reference by transaction name)
 
@@ -757,7 +802,7 @@ Repeats of the same block kind keep the order you write them in.
 - Special naked entries: `noop` (do nothing) and `rollback` (roll back transaction, only inside transactions)
 - Conditionals can be nested
 - The `if` condition must evaluate to boolean; `match` and `eq` values are compared as strings
-- Standalone conditionals cannot be used with `weights`
+- Standalone conditionals can't be used with `weights`
 - Example files: `examples/conditional_if/`, `examples/conditional_match/`
 
 ### Workers
@@ -809,7 +854,7 @@ Repeats of the same block kind keep the order you write them in.
   }
   ```
   All gauge bars share one y-axis, so split metrics with very different magnitudes across separate stats nodes
-- `type: none` draws no chart at all. The query still runs and still contributes its print values (and any `agg`) to the stats table, but earns no page in the chart rotation. Use it for metrics that read better as a number than a shape - a count that is almost always zero, or an invariant you only care about breaching - so they stop costing a page to arrow past:
+- `type: none` draws no chart at all. The query still runs and still contributes its print values (and any `agg`) to the stats table, but earns no page in the chart rotation. Use it for metrics that read better as a number than a shape - a count that's almost always zero, or an invariant you only care about breaching - so they stop costing a page to arrow past:
   ```edg
   stats (rate: 1/5s) {
     overdrawn (
@@ -826,7 +871,7 @@ Repeats of the same block kind keep the order you write them in.
     voters (type: gauge, post_print: { key: 'voters', value: result().min_voters }) `...`
   }
   ```
-  - Use `split` when the metrics need their own charts but still have to be read against each other - every chart on the page is drawn to the same scale, so one peaking at 3 next to one peaking at 1700 reads as the smaller thing it is
+  - Use `split` when the metrics need their own charts but still have to be read against each other - every chart on the page is drawn to the same scale, so one peaking at 3 next to one peaking at 1700 reads as the smaller thing it's
   - Use `merge` only when the metrics are directly comparable. It requires every query in the block to have the same chart type, else the config fails to parse. Merged labels are prefixed with the query name (`node/under`)
   - `split` falls back to paging when the terminal can't give each chart ~24 columns
   - Put metrics orders of magnitude apart in **separate blocks**, or use `layout: page` - sharing a scale squashes the smaller one either way
@@ -916,7 +961,7 @@ hooks {
 - `qps` accepts a static integer (e.g. `qps: 1000`), `ramp(start, end, duration)` to move QPS linearly from `start` to `end` (e.g. `qps: ramp(10, 1000, 60s)` ramps from 10 to 1,000 QPS over 60 seconds), or `signal('name', peak: N)` to follow a signal buffer
 - `end` may be lower than `start`, which winds a stage down (e.g. `qps: ramp(900, 40, 90m)`). The ramp occupies the *first* `duration` of the stage and `end` is held for whatever remains, so `ramp()` is a transition into a stage, not a shape spanning it - use `signal()` for a rate that varies across the whole stage
 - Because the end value is held, a ramp much shorter than its stage leaves the run flat: `between_cuts(duration: 24h, qps: ramp(3, 25, 20m))` is a constant 25 qps for 23h40m of its 24h. A workload meant to peak needs several stages, one per leg of the curve. `edg doctor` reports any ramp finishing in under 5% of its stage
-- `qps: signal('name', peak: N)` drives the rate limiter from a pre-computed signal buffer, so one declaration can shape both the load and the data. The buffer is normalised, not read raw: its maximum maps to `peak` QPS. `peak` is required and must be positive, and `signal()` cannot be combined with `ramp()`:
+- `qps: signal('name', peak: N)` drives the rate limiter from a pre-computed signal buffer, so one declaration can shape both the load and the data. The buffer is normalised, not read raw: its maximum maps to `peak` QPS. `peak` is required and must be positive, and `signal()` can't be combined with `ramp()`:
   ```edg
   sim(period: '24h', in: '20m', from: '2024-06-03T00:00:00Z')
 
@@ -930,7 +975,7 @@ hooks {
   ```
 - The signal named by `qps: signal(...)` can be one of the ten edg bundles (`signal('edg-staircase', peak: 1000)`) rather than one the config declares - see *Bundled shapes*
 - Buffer position for `qps: signal()` is measured from the start of the **run**, not the start of the stage, so consecutive stages carve up one curve instead of each replaying it from the beginning. Two indexing rules, in order: (1) with a `sim` block and a signal that declares an `interval`, the buffer advances one step per `interval` of *simulated* time and wraps at the end; (2) otherwise it stretches across the whole run. The run starts at buffer index 0 unless both `sim` and the signal declare a `from`, in which case the run joins the curve where the sim clock starts
-- Values between buffer points are linearly interpolated, negative values clamp to zero, and the rate is floored at 1 QPS (a rate limiter at 0 blocks forever and would stall the stage). A signal whose maximum is not positive is a load-time error. Set workers high enough to sustain `peak`, or the pool saturates and the curve flattens at the top
+- Values between buffer points are linearly interpolated, negative values clamp to zero, and the rate is floored at 1 QPS (a rate limiter at 0 blocks forever and would stall the stage). A signal whose maximum isn't positive is a load-time error. Set workers high enough to sustain `peak`, or the pool saturates and the curve flattens at the top
 - `ramp_duration` controls worker staggering: for stages without `qps`, workers are spawned incrementally over the ramp period; for stages with a static `qps`, all workers start immediately and QPS increases linearly. `ramp_duration` is independent of `qps: ramp()`. Must be less than `duration`
 - When a stage defines `weights`, workers in that stage use those weights instead of the top-level `weights` block
 - Workers (background queries) run for the entire duration across all stages, unaffected by per-stage weights
@@ -952,14 +997,14 @@ hooks {
   ```
 - `--env` is repeatable rather than comma-separated, so a value containing a comma survives. An explicit `--env` beats `--env-file`
 - The same flags work on `edg jobs submit` and `edg cluster submit`, where they matter more: there the process evaluating the config is a server or agent whose own environment was fixed at deploy time, so without them every `coalesce(env_nil('...'), default)` falls back to its default
-- Job env only affects `env()`/`env_nil()` during expression evaluation; it never changes the receiving process's own environment. On a cluster it is stored in the coordination database in plaintext - use it for parameters, not secrets
+- Job env only affects `env()`/`env_nil()` during expression evaluation; it never changes the receiving process's own environment. On a cluster it's stored in the coordination database in plaintext - use it for parameters, not secrets
 
 ### Inspecting a run before teardown
 - `edg all` runs `deseed` and `down` the moment the run finishes, so by the time the summary prints the data is gone. `--pause` holds the process in between:
   ```sh
   edg all --config workload.edg --url "$URL" --pause
   ```
-- Press enter or ctrl+c to carry on; teardown then runs as usual, from a fresh context, so resuming with ctrl+c does not skip it
+- Press enter or ctrl+c to carry on; teardown then runs as usual, from a fresh context, so resuming with ctrl+c doesn't skip it
 - The pause also ends when standard input does, so redirecting stdin from `/dev/null` tears down immediately rather than hanging a pipeline. A config with no `deseed` and no `down` never pauses
 - A multi-target `all` takes the same flag, pausing once before every target is torn down. Suggest `--pause` whenever the user wants to query the data themselves after a run, instead of telling them to drop the teardown sections from the config
 - Under `--tui` there is no prompt: the TUI holds its final frame with the clock frozen, and the status bar reads `[Enter/q] Deseed and down`. That pairing is what to suggest for screenshots of a finished run
@@ -983,7 +1028,7 @@ hooks {
 - The query still executes normally; only stats collection is suppressed
 - When a transaction is ignored, all its inner queries are also ignored
 - Individual queries inside a non-ignored transaction can be ignored independently
-- Use for helper queries whose latency is not meaningful to the benchmark (e.g. setup reads, cache refreshes)
+- Use for helper queries whose latency isn't meaningful to the benchmark (e.g. setup reads, cache refreshes)
   ```edg
   run {
     refresh_cache(ignore: true) `SELECT id, name FROM product`
@@ -992,7 +1037,7 @@ hooks {
 
 ### Downtime
 - Every run measures how long its database was uncontactable and reports it without any configuration: a `DOWNTIME` column plus a `TOTAL` row in the progress and summary tables, a `Downtime:` line in the summary, a Downtime page in the TUI (last page of the Stats view), and the `edg_target_up` / `edg_target_downtime_seconds_total` / `edg_target_outages_total` Prometheus metrics
-- Only unreachability counts. A constraint violation, serialization failure or syntax error means the database answered, so none register; connection failures, `driver.ErrBadConn`, and server-shutdown codes (PostgreSQL `08*`/`57P0x`, MySQL `1053`/`2006`/`2013`, Cassandra `Unavailable`, Redis `LOADING`/`CLUSTERDOWN`) do. A cancelled query never counts - that is the run shutting down
+- Only unreachability counts. A constraint violation, serialization failure or syntax error means the database answered, so none register; connection failures, `driver.ErrBadConn`, and server-shutdown codes (PostgreSQL `08*`/`57P0x`, MySQL `1053`/`2006`/`2013`, Cassandra `Unavailable`, Redis `LOADING`/`CLUSTERDOWN`) do. A cancelled query never counts - that's the run shutting down
 - Two observers feed one figure: the workload's own attempts, and a prober pinging once a second on a fixed clock. The prober is what makes it trustworthy, because a real outage is exactly when workers block on hung connections and stop producing results
 - A query's `DOWNTIME` cell comes from that query's own attempts; the `TOTAL` row is the target-level union. They differ on purpose - one query's cell being higher than the rest means that query is struggling, not that the database went away. Never sum the cells: two queries failing through one outage each record it
 - A trailing `*` means the outage is still open (`9s*` = down for 9s and counting)
@@ -1016,7 +1061,7 @@ hooks {
 
 ### Request Timeout
 - Setting `request_timeout` on a query applies a per-execution timeout
-- If the query exceeds the deadline, it is cancelled and counted as an error
+- If the query exceeds the deadline, it's cancelled and counted as an error
 - Overrides the `--request-timeout` CLI flag passed to the run command
   ```edg
   run {
@@ -1314,7 +1359,7 @@ MongoDB uses BSON/JSON command syntax instead of SQL. Queries are JSON objects s
 - **Reference data**: Use `{"find": "collection", "filter": {}}` in `seed` or `init` with `type: query` to populate datasets
 - **ObjectIDs**: Use `objectid()` to generate MongoDB ObjectIDs. Format as `{"$oid": "$1"}` in JSON commands
 - **Transactions**: edg supports `transaction` blocks for MongoDB using multi-document sessions. Commands run within a session context and are committed or rolled back atomically. Use the same `transaction` / `let` / `rollback_if` syntax as SQL drivers
-- **Transaction-safe counting**: The `count` command and `$count` aggregation stage cannot be used inside multi-document transactions. Use `$group` with `$cond` instead - it always returns a document even when no rows match:
+- **Transaction-safe counting**: The `count` command and `$count` aggregation stage can't be used inside multi-document transactions. Use `$group` with `$cond` instead - it always returns a document even when no rows match:
   ```json
   {"aggregate": "coll", "pipeline": [{"$group": {"_id": null, "n": {"$sum": {"$cond": [{"$eq": ["$field", true]}, 1, 0]}}}}], "cursor": {}}
   ```
@@ -1372,7 +1417,7 @@ Cassandra uses CQL (Cassandra Query Language). Tables must live inside a keyspac
 - **Serial consistency**: Use `--cassandra-serial-consistency` for lightweight transactions (LWT). Values: `serial` (global Paxos) or `local_serial` (local DC only, default)
 - **Idempotent queries**: Use `--cassandra-idempotent` to enable speculative execution and retry on other nodes. Safe for reads and repeatable writes
 - **No discovery**: Use `--cassandra-no-discovery` to skip `system.peers` lookup and connect only to seed hosts. Useful behind load balancers or for faster startup
-- **LWT workloads**: Require `--no-atomic-tx` since Cassandra does not support `IF` conditions inside batches
+- **LWT workloads**: Require `--no-atomic-tx` since Cassandra doesn't support `IF` conditions inside batches
 
 Example:
 ```edg
@@ -1415,12 +1460,12 @@ down {
 
 SQLite is embedded, so the `--url` is a file path or `file:` URI rather than a host. edg passes it to the driver unchanged.
 
-- **Placeholders**: `?` (positional). Note `?` cannot be repeated; if a value is needed twice, add it twice to the args
+- **Placeholders**: `?` (positional). Note `?` can't be repeated; if a value is needed twice, add it twice to the args
 - **Batch inserts**: `__columns__`/`__values__` work as they do on Postgres
 - **No `TRUNCATE`**: use `DELETE FROM t` for deseed
 - **No inline indexes**: `CREATE INDEX IF NOT EXISTS idx ON t (col)` as its own `up` query
 - **Type affinity**: `TEXT` for UUIDs, `INTEGER`, `REAL`, `BLOB`, `TIMESTAMP`. Any type name is accepted; affinity is derived from it
-- **Single writer**: SQLite serialises writers. Multi-worker write workloads need `?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_txlock=immediate` in the URL, or they fail with `database is locked (5) (SQLITE_BUSY)`. `_txlock=immediate` matters for any transaction that reads before it writes: a deferred transaction fails its lock upgrade with `database is locked (517)`, which `busy_timeout` does not retry. `--pool-size 1` also works, at the cost of concurrency
+- **Single writer**: SQLite serialises writers. Multi-worker write workloads need `?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_txlock=immediate` in the URL, or they fail with `database is locked (5) (SQLITE_BUSY)`. `_txlock=immediate` matters for any transaction that reads before it writes: a deferred transaction fails its lock upgrade with `database is locked (517)`, which `busy_timeout` doesn't retry. `--pool-size 1` also works, at the cost of concurrency
 - **`:memory:`**: each connection gets its own private database, so pair it with `--pool-size 1`
 - **Function equivalents**: `UUID()` -> `lower(hex(randomblob(16)))`, `RAND()` -> `abs(random()) % 1000000 / 1000000.0`, `FLOOR(RAND()*N)` -> `abs(random()) % N`, `MD5(RAND())` -> `hex(randomblob(16))`, `CONCAT(a,b)` -> `a || b`, `SUBSTRING` -> `substr`, `IF(c,a,b)` -> `iif(c,a,b)`, `ELT` -> `CASE`, `NOW()` -> `datetime('now')`, `MOD(a,b)` -> `a % b`, `DATE_ADD(d, INTERVAL n DAY)` -> `date(d, '+n days')`, `ORDER BY RAND()` -> `ORDER BY random()`, `CAST(x AS SIGNED)` -> `CAST(x AS INTEGER)`
 - **Upsert**: `INSERT ... ON CONFLICT(col) DO UPDATE SET x = excluded.x`; `INSERT OR IGNORE` to skip duplicates
@@ -1468,7 +1513,7 @@ Redis queries are commands, written as you'd type them into `redis-cli`. There i
 - **Reads for `init`**: no `SELECT`, so use a cursored `SCAN` wrapped in `EVAL`. Never `KEYS`, which blocks the server for the whole sweep. Refer to the results as `ref('fetch_x').value`
 - **Cleanup**: `SCAN` + `UNLINK` in a Lua script for deseed/down. `UNLINK` frees keys on a background thread; `DEL` blocks
 - **Batches**: `exec_batch` sends commands in a single non-transactional pipeline, applied independently
-- **Transactions**: `transaction` blocks use `MULTI`/`EXEC`. Writes queue until commit, reads run immediately, so a transaction cannot read its own uncommitted writes. `rollback_if` issues `DISCARD`, which cannot undo reads that already ran
+- **Transactions**: `transaction` blocks use `MULTI`/`EXEC`. Writes queue until commit, reads run immediately, so a transaction can't read its own uncommitted writes. `rollback_if` issues `DISCARD`, which can't undo reads that already ran
 - **No prepared statements**: `prepared: true` errors with `driver does not support prepared statements`
 - **Numbers**: `uniform.int` returns an integer; `uniform.float` returns a float. Wrap the float form in `int()` where Redis requires an integer (`HINCRBY`, `EXPIRE`, `SETRANGE`)
 - **URLs**: `redis://user:pass@host:6379/0`. A bare `host:port` is accepted and prefixed automatically
@@ -1513,7 +1558,7 @@ The `test` driver is a set of named in-memory key/value maps, for running a conf
 - **`DEL` empties, `DROP` removes**: `DEL m *` clears a map but leaves it usable (what `deseed` wants); `DROP m` removes it (what `down` wants). The trailing `*` is the only wildcard - without it `DEL` matches one key exactly
 - **Placeholders**: `$1`, `$2`, ... inlined into the command text
 - **Tables are maps**: there is no schema. Each table becomes a map of the same name
-- **Flat values**: no record type. A multi-column row is space-joined into one value, so `GET` returns the whole row, not its fields. Column boundaries are not recoverable
+- **Flat values**: no record type. A multi-column row is space-joined into one value, so `GET` returns the whole row, not its fields. Column boundaries aren't recoverable
 - **Never quote a batch group**: write `SET m $1 $2 $3`, not `SET m $1 "$2 $3"`. Batch expansion skips anything inside quotes, so the quoted form silently writes every row the same separator-laden value instead of erroring
 - **Type inference**: as with Redis, mark writes `type: exec` to skip reading a reply
 - **Replies as rows**: `GET` is a single `value`; `LIST` is one row per key under `value`, sorted, with bare keys. A missing key yields no rows rather than an error; a missing map is an error
@@ -1643,13 +1688,13 @@ Without `--schema`, the output contains only `stages`, `weights`, and `run` - su
 
 ## Common Mistakes
 
-Do NOT generate configs with these errors:
+Don't generate configs with these errors:
 
 | Mistake | Why it breaks | Fix |
 |---|---|---|
 | SELECT in `init` without explicit type | Type inferred as `exec` from context, won't populate named dataset | Ensure init SELECT queries populate datasets correctly |
 | `ref('x')` before dataset `x` is populated | No `init` or `seed` query named `x` exists | Add an `init` or `seed` query that populates `x` |
-| Batch types inside `transaction` | Not supported - batch types cannot be used in transactions | Use regular queries inside transactions |
+| Batch types inside `transaction` | Not supported - batch types can't be used in transactions | Use regular queries inside transactions |
 | `prepared: true` inside `transaction` | Not supported | Remove `prepared: true` from transaction queries |
 | `prepared: true` on a query taking a float arg | Prepared binds the float; inlining rounds it. `uniform.float(0.0, 1000.0, 2)` returning `855.73` stores `856` inlined but `855` prepared | Wrap in `int()` if you want the prepared path, or drop `prepared: true` |
 | `gen('number:1,100')` for Spanner INT64 columns | Returns float64, Spanner rejects for INT64 bind params | Wrap in `int()`: `int(gen('number:1,100'))` |
@@ -1792,6 +1837,20 @@ target mysql(   url: env('MY_URL'), driver: 'mysql', config: 'mysql.edg')
 ```
 
 The manifest declares targets and nothing else. Each `config` is an ordinary config that declares no targets of its own, so it still runs standalone. Add a third target and the comparison widens - nothing else changes.
+
+A manifest may point at another manifest, which is how one run compares several *groups* of workloads. Name the group once and aim it at each database from above; the url and driver flow down to the targets inside it:
+
+```edg
+# all.edg
+target cockroach(url: env('CRDB_URL'), driver: 'pgx', config: 'group.edg')
+target postgres(url: env('POSTGRES_URL'), driver: 'pgx', config: 'group.edg')
+
+# group.edg
+target oltp(config: 'oltp.edg')
+target olap(config: 'olap.edg')
+```
+
+That runs four streams - `cockroach.oltp`, `cockroach.olap`, `postgres.oltp`, `postgres.olap` - and each file in the tree is still a config in its own right. Prefer the flat manifest unless the user really is crossing two dimensions; nesting earns its keep only when the same group runs against several databases.
 
 ### Requirements for compare-compatible configs
 

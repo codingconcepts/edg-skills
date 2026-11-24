@@ -62,7 +62,13 @@ Named args are required when another expression in the same query reads the valu
 | `gen('number:1,100')` | Random int in range |
 | `gen('sentence:5')` | Random sentence |
 | `regex('[A-Z]{3}-[0-9]{4}')` | String matching regex |
+| `regex('[a-z]{5,12}')` | Regex with an explicit length range |
 | `bool()` | Random true/false |
+| `markov_string('person.first')` | New string from a Markov chain trained on a list, a `dataset.field` from an init query, or a gofakeit `category.key` list |
+| `markov_string(source, order, min_len, max_len)` | Same, with order (default 2) and length bounds (default 3-12). Never returns a training word; trained once per run, so keep the arguments constant |
+| | Raising order shrinks the chain's vocabulary, since more output is a training word and those are rejected. `edg doctor` counts it; too narrow a chain under `uniq()`/`uniq_across()` is a config error |
+
+`regex()` takes RE2, so no lookarounds or backreferences. `*`, `+` and `{n,}` generate at most 10 repetitions, while an explicit `{n,m}` is honoured as written - use `{n,m}` when the length matters. Anchors (`^`, `$`, `\b`) are ignored. `.` and negated classes draw from printable ASCII. Under `(?i)` each letter is drawn from its Unicode case variants, so `(?i)s` can yield `ſ` - spell the cases out as `[sS]` when the column must stay ASCII. An unparseable pattern is a validation error, not a generated value.
 
 ### Numeric Distributions
 | Function | Description |
@@ -92,7 +98,7 @@ There is deliberately no `binomial.float`, `poisson.float` or `zipf.float` - tho
 ### Set Distributions
 | Function | Description |
 |---|---|
-| `set(values, weights)` | Uniform or weighted pick from a set |
+| `set(values[, weights])` | Pick from a set, uniform without `weights`, weighted with them |
 | `norm.set(values, mean, stddev)` | Normal distribution over set indices |
 | `exp.set(values, rate)` | Exponential over set indices |
 | `pareto.set(values, alpha)` | Pareto over set indices (continuous power-law) |
@@ -292,7 +298,7 @@ Errors if `minN < 1`, if `maxN < minN`, or if N distinct values aren't found wit
 
 Quoted and unquoted spellings behave the same: `uniq("gen('email')")` and `uniq(gen('email'))` both redraw. A plain call would normally be evaluated before `uniq()` saw it, leaving nothing to redraw from, so the compiler quotes call-shaped arguments for you. Quoting explicitly is still the clearer spelling.
 
-What the compiler cannot fix: a bare literal (`uniq(500)`) or an identifier holding a non-expression value. An identifier is left alone deliberately - it may already hold the expression as a string, as in `uniq(email_expr)` where a global holds `"gen('email')"`. `edg doctor` reports the cases that remain.
+What the compiler can't fix: a bare literal (`uniq(500)`) or an identifier holding a non-expression value. An identifier is left alone deliberately - it may already hold the expression as a string, as in `uniq(email_expr)` where a global holds `"gen('email')"`. `edg doctor` reports the cases that remain.
 
 `uniq()`'s seen set covers one pass of arg evaluation. A batch query generates all its rows in one pass, so `uniq()` de-duplicates across the batch. A non-batch `run` query generates one row per iteration, so a lone `uniq()` call there compares against an empty set and can never reject a duplicate - use `uniq_across('pool', "expr")` for uniqueness across iterations. `edg doctor` reports this too.
 
@@ -369,6 +375,30 @@ insert_contact(type: exec) `INSERT INTO contact (is_email, email, phone) VALUES 
   cond(!arg(0), gen('phone'), nil)   # phone if false
 )
 ```
+
+### Polymorphic associations (STI / MTI)
+
+A type column decides which parent table the foreign key points at. Generate the type first, then branch every dependent column on it with `cond()` and `arg()`, so type and id can never disagree. Weights on the type set the parent mix independently of how many rows each parent table holds.
+
+```edg
+# STI: one id column, no foreign key possible
+populate_comment(type: exec_batch, count: comments) `INSERT INTO comment (commentable_type, commentable_id, body)
+  __values__` (
+  commentable_type: uniform.set(['post', 'video'], [70, 30]),
+  commentable_id: cond(arg('commentable_type') == 'post', ref('populate_post').id, ref('populate_video').id),
+  body: gen('loremipsumsentence:12')
+)
+
+# MTI: one nullable FK per parent, exclusive arc enforced by a CHECK constraint
+populate_reaction(type: exec_batch, count: reactions) `INSERT INTO reaction (target_type, post_id, video_id)
+  __values__` (
+  target_type: uniform.set(['post', 'video'], [70, 30]),
+  post_id: cond(arg('target_type') == 'post', ref('populate_post').id, nil),
+  video_id: cond(arg('target_type') == 'video', ref('populate_video').id, nil)
+)
+```
+
+`ref('populate_post')` reads rows an earlier seed query generated, so no `SELECT` round-trip is needed. Never call `ref()` twice for the same parent in one row: each call picks a fresh row, so the columns disagree. Reuse the value with `arg()` instead.
 
 ### Computed total from earlier args
 ```edg

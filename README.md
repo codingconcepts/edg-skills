@@ -24,6 +24,7 @@ npx skills add codingconcepts/edg-skills --agent claude-code --skill edg-config 
 | [`/edg-validate`](skills/edg-validate/) | Run `edg validate` on a config file, interpret errors, and suggest fixes |
 | [`/edg-expression`](skills/edg-expression/) | Find the right edg expression for a use case, explain functions, and debug syntax |
 | [`/edg-fuzz`](skills/edg-fuzz/) | Fuzz an expression to inspect its output distribution, null rate, and type breakdown |
+| [`/edg-debug`](skills/edg-debug/) | Step a workload with breakpoints to find why a query, expression or branch behaves the way it does |
 
 ## Usage
 
@@ -63,8 +64,16 @@ skewed toward cheaper items, rounded to 2 decimal places.
 Check the distribution of zipf(1.2, 1, 10000) over 50k iterations.
 ```
 
+### Debug a workload
+
+```
+/edg-debug
+
+The charge_card query sometimes writes a negative balance. Find out why.
+```
+
 ## Tips
 
-- **Combine skills**: Generate with `/edg-config`, sanity-check expressions with `/edg-fuzz`, then validate with `/edg-validate`
+- **Combine skills**: Generate with `/edg-config`, sanity-check expressions with `/edg-fuzz`, then validate with `/edg-validate`, and when it runs but misbehaves, step it with `/edg-debug`
 - **Use the REPL**: `edg repl` lets you test expressions interactively with tab completion
 - **Discover functions**: `edg functions [search]` lists available functions by name

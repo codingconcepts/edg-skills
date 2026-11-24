@@ -38,7 +38,7 @@ You validate edg workload configurations by running `edg validate` and interpret
    - **Invalid query type**: Using `query` when `exec` is needed, or vice versa
    - **Batch config errors**: Missing `count`/`size` for batch types, or using batch args with non-batch types
    - **Transaction constraint violations**: Using `exec_batch`/`query_batch` or `prepared: true` inside a transaction, or an empty transaction with no queries
-   - **Target errors**: A `target` missing its `url`, a duplicate target name, or a `url`/`driver` written as bare text rather than a quoted string (`url: postgres://host` instead of `url: 'postgres://host'`). Target expressions are compiled, not evaluated, so an unset `env()` variable is not a validation error
+   - **Target errors**: A `target` missing its `url`, a duplicate target name, or a `url`/`driver` written as bare text rather than a quoted string (`url: postgres://host` instead of `url: 'postgres://host'`). Target expressions are compiled, not evaluated, so an unset `env()` variable isn't a validation error
    - **Worker config errors**: Missing worker name, invalid rate format, rate with non-positive times/interval, specifying both rate and delay, or specifying neither
 
 5. **Apply fixes.** If the user asks, edit the config file to fix the issues and re-validate.
@@ -59,8 +59,8 @@ You validate edg workload configurations by running `edg validate` and interpret
 | Expected exec, got query | SELECT used with `type: exec` | Change to `type: query` |
 | Batch requires count | `exec_batch` without `count` field | Add `count` and `size` fields |
 | Expression compile error | Invalid expr-lang syntax | Check for missing quotes, unmatched parens, or invalid operators |
-| Cannot be a batch type inside a transaction | `exec_batch`/`query_batch` in transaction | Change to `exec`/`query` and move batching outside the transaction |
-| Cannot use prepared statements inside a transaction | `prepared: true` in transaction | Remove `prepared: true` from queries inside the transaction |
+| `cannot be a batch type inside a transaction` | `exec_batch`/`query_batch` in transaction | Change to `exec`/`query` and move batching outside the transaction |
+| `cannot use prepared statements inside a transaction` | `prepared: true` in transaction | Remove `prepared: true` from queries inside the transaction |
 | Must contain at least one query | Empty transaction | Add queries to the transaction or remove it |
 | Worker is missing a name | Worker entry without `name` | Add a `name` field to the worker |
 | Rate must have positive times and interval | Invalid `rate` value (zero/negative) | Use format `times/interval` e.g. `1/10s`, `3/1m` |
@@ -82,7 +82,7 @@ You validate edg workload configurations by running `edg validate` and interpret
 | `rollback` outside transaction | `rollback` used as a standalone run item | Move inside a `transaction { }` block or use `noop` instead |
 | `rollback_if` outside transaction | `rollback_if` used in standalone run item | Move inside a transaction |
 | Mutually exclusive fields | Entry combines `if` + `match`, `if` + `rollback_if`, etc. | Use only one special field per entry |
-| Standalone `if`/`match` with `run_weights` | Conditional blocks cannot be weighted | Remove conditionals from weighted sections or remove the `weights` block |
+| Standalone `if`/`match` with `run_weights` | Conditional blocks can't be weighted | Remove conditionals from weighted sections or remove the `weights` block |
 | `driver does not support prepared statements` | `prepared: true` on a mongodb, cassandra, redis, or test query | Remove `prepared: true`; those drivers have no prepare step |
 | `database is locked (5) (SQLITE_BUSY)` | Multiple SQLite writers with no busy timeout | Add pragmas to the URL: `file:edg.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)`, or run with `--pool-size 1` |
 | `database is locked (517)` | A deferred SQLite transaction read before it wrote and lost the lock upgrade; `busy_timeout` doesn't retry this | Add `&_txlock=immediate` to the URL so transactions begin as writers |
