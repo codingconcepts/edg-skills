@@ -22,6 +22,7 @@ You validate edg workload configurations by running `edg validate` and interpret
    - `CREATE KEYSPACE`, `KEYSPACE`, fully-qualified `ks.table` names -> `cassandra`
    - `HSET`, `HGETALL`, `SADD`, `SCAN`, `UNLINK`, `EVAL`, `PING` (Redis commands, no SQL) -> `redis`
    - `randomblob(`, `abs(random())`, `datetime('now')`, `AUTOINCREMENT`, `INSERT OR REPLACE`, `PRAGMA` -> `sqlite`
+   - SQLite dialect reached over a `libsql://`/`ws://` URL, or a config the user says targets Turso -> `libsql`. The SQL is identical to `sqlite`, so only the connection tells them apart
    - `CREATE <name>`/`DROP <name>` with no column definitions, plus `GET`/`SET`/`DEL`/`LIST` and nothing else (no `HSET`/`EVAL`/`SCAN`) -> `test`
    - If unclear, default to `pgx`
 

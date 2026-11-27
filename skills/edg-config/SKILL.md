@@ -6,14 +6,14 @@ user-invocable: true
 
 # edg Config Generator
 
-You are an expert at creating edg (Expression-based Data Generator) workload configurations. When the user describes a database schema and workload, generate a complete, valid edg config file in DSL format (`.edg`).
+You're an expert at creating edg (Expression-based Data Generator) workload configurations. When the user describes a database schema and workload, generate a complete, valid edg config file in DSL format (`.edg`).
 
 ## Input
 
 The user will describe:
 - The database tables and their columns
 - The type of workload (read-heavy, write-heavy, mixed)
-- The target database driver (pgx, mysql, mssql, oracle, dsql, spanner, mongodb, cassandra, sqlite, redis, test)
+- The target database driver (pgx, mysql, mssql, oracle, dsql, spanner, mongodb, cassandra, sqlite, libsql, redis, test)
 - Any specific data distribution requirements (hot keys, skewed access, etc.)
 
 If the user doesn't specify a driver, default to `pgx`.
@@ -33,7 +33,7 @@ If the user doesn't specify a driver, default to `pgx`.
 
 Before generating a config, read 1-2 example files from `examples/` that match the user's request. This grounds your output in known-good configs.
 
-**File naming:** `examples/{feature}/{driver}.edg` - use `crdb.edg` for pgx, `mongodb.edg` for mongodb, `cassandra.edg` for cassandra, `sqlite.edg` for sqlite, `redis.edg` for redis, `test.edg` for test.
+**File naming:** `examples/{feature}/{driver}.edg` - use `crdb.edg` for pgx, `mongodb.edg` for mongodb, `cassandra.edg` for cassandra, `sqlite.edg` for sqlite, `libsql.edg` for libsql, `redis.edg` for redis, `test.edg` for test.
 
 Match user request features to example directories:
 
@@ -45,6 +45,7 @@ Match user request features to example directories:
 | Background workers | `workers/` |
 | Event-driven hooks (HTTP/Kafka) | `hooks/http`, `hooks/kafka` |
 | Staged workloads | `stages/`, `stages_run_weights/` |
+| Several client classes at once (OLTP + reporting + background) | `stage_groups/` |
 | Signal-driven QPS (load shaped by a curve) | `qps_shapes/` |
 | Ready-made load shapes (no expression needed) | `bundled_shapes/` |
 | Temporal patterns | `temporal_patterns/` |
@@ -65,6 +66,7 @@ Match user request features to example directories:
 | Groups of workloads across several databases | `nested_targets/` |
 | Distributed cluster | `cluster/` |
 | Vectors / embeddings | `vector/`, `embed/` |
+| Vector index recall | `vector_recall/` |
 | LLM structured generation | `llm/` |
 | Expectations / CI | `expectations/` |
 | Invoice line items | `invoice_lines/` |
@@ -380,6 +382,8 @@ Repeats of the same block kind keep the order you write them in.
 - `uniform.seq("name")` for uniform random picks from already-generated sequence values
 - `zipf.seq("name", s, v)` / `pareto.seq("name", alpha)` / `norm.seq("name", mean, stddev)` / `exp.seq("name", rate)` / `lognorm.seq("name", mu, sigma)` / `beta.seq("name", alpha, beta)` / `gamma.seq("name", shape, rate)` / `weibull.seq("name", shape, scale)` / `poisson.seq("name", lambda)` / `binomial.seq("name", n, p)` / `empirical.seq("name", samples)` for distribution-based picks from sequence values
 - Distribution-based vector functions pick cluster centroids using statistical distributions: `pareto.vector(dims, clusters, spread, alpha)`, `zipf.vector(dims, clusters, spread, s, v)`, `norm.vector(dims, clusters, spread, mean, stddev)`, `exp.vector(dims, clusters, spread, rate)` (cluster 0 hottest), `lognorm.vector(dims, clusters, spread, mu, sigma)`
+- `knn(data, field, query, k)` / `knn(data, field, query, k, metric)` for brute-force k nearest neighbours over an already-loaded dataset - the exact ground truth an approximate vector index is measured against. `data` is a dataset name (from an `init` query) or an inline collection, `field` names the vector column, `metric` is `cosine` (default), `l2` or `ip`. Computed in Go over rows already in memory, so it needs no planner hint and behaves the same on every driver. O(rows x dims) per call - size the `init` corpus for the measurement, not the workload
+- `recall(truth, got, field)` for the share of ground-truth rows an approximate search found, in `[0, 1]`. Each of `truth` and `got` is a dataset name, an inline collection, or `results()` for the running query's own rows. Matched on `field` as sets, so order and duplicates don't matter; extra rows in `got` are ignored. Empty `truth` is an error, empty `got` is `0`. Pair with `knn` in an `assert` to fail a run when index recall drops below a floor: `assert: recall(knn('all_articles', 'embedding', local('q'), 10), results(), 'id') >= 0.9`. The metric passed to `knn` must match the one the index was built with
 - `embed(text...)` for real vector embeddings via an external API (OpenAI-compatible). Variadic - joins args with space. Requires `--embed-api-key` or `EDG_EMBED_API_KEY`. Configure endpoint with `--embed-url`, model with `--embed-model`, dimensions with `--embed-dimensions`. Use for semantic similarity search with real embeddings instead of synthetic `vector()` clusters
 - `complete(tool_name, prompt)` for LLM-generated structured data via tool calling. Returns a map; access fields with `.field`. Define tools in a top-level `complete { tool name(...) { ... } }` block. Use `locals` to call once per row and access multiple fields. Retries up to 3 times on missing/invalid tool calls, validates response types against schema. 120s per-request timeout. Requires `--complete-api-key` or `EDG_COMPLETE_API_KEY`. Configure endpoint with `--complete-url`, model with `--complete-model`. Any OpenAI-compatible API works (Ollama, vLLM, etc.)
 - `complete_array(tool_name, prompt, count)` for generating N structured items in a single LLM call. Returns `[]map`; use with `ref_each(local(...))` to iterate. Tool schema auto-wrapped in array request. Memoized by (tool, prompt, count). Same config flags as `complete()`
@@ -686,7 +690,7 @@ Repeats of the same block kind keep the order you write them in.
 - Use `uniq("expression")` to retry a generator until a unique value is produced (e.g., `uniq("gen('airlineairportiata')")` for unique IATA codes). Defaults to 100 retries; override with `uniq("expression", 500)`. The unquoted form `uniq(gen('email'))` works too - the compiler quotes call-shaped arguments - but quoting is the clearer spelling
 - For composite uniqueness across columns, pass multiple expressions: `uniq("gen('firstname')", "gen('lastname')")[0]` and `...[1]`. Returns `[]any`; same-row calls with identical expressions return cached tuple
 - Use `uniq_across('pool_name', "expression")` for cross-query uniqueness. Unlike `uniq()`, whose seen set covers only one pass of arg evaluation (the whole batch for a batch query, a single row for a non-batch `run` query), `uniq_across` shares a named pool that persists across all queries. In a non-batch `run` query `uniq_across` is the only form that de-duplicates across iterations. Use when values must be globally unique across tables (e.g., `uniq_across('emails', "gen('email')")` in both `users` and `admins` seeds). Supports composite tuples: `uniq_across('names', "gen('firstname')", "gen('lastname')")`, which is how to feed a compound `UNIQUE (a, b)` index - the pair is what must be unique, so the individual columns are free to repeat. The pool is shared by every worker in the run, so give the expression's range ~10% more values than the rows drawn from it, or the retries will start failing
-- **`__values__` token (recommended)**: Use `__values__` in the query to generate a multi-row `VALUES` clause instead of driver-specific batch expansion (`unnest`/`JSON_TABLE`/`OPENJSON`). Produces `VALUES (v1, v2), (v3, v4), ...` - one INSERT per batch. Works with `exec_batch`/`query_batch` and also with `type: exec`/`query` when using batch-expanding args (`gen_batch()`, `batch()`, `ref_each()`, `ref_cursor()`). Works with pgx, mysql, mssql, spanner, sqlite, dsql. For Oracle, use `__values__(table(col1, col2))` to generate `INSERT ALL INTO table (cols) VALUES (...) ... SELECT 1 FROM DUAL`. Doesn't work with MongoDB, Cassandra, or Redis. Also supports upsert (`ON CONFLICT`/`ON DUPLICATE KEY`/`MERGE`) and update via CTE
+- **`__values__` token (recommended)**: Use `__values__` in the query to generate a multi-row `VALUES` clause instead of driver-specific batch expansion (`unnest`/`JSON_TABLE`/`OPENJSON`). Produces `VALUES (v1, v2), (v3, v4), ...` - one INSERT per batch. Works with `exec_batch`/`query_batch` and also with `type: exec`/`query` when using batch-expanding args (`gen_batch()`, `batch()`, `ref_each()`, `ref_cursor()`). Works with pgx, mysql, mssql, spanner, sqlite, libsql, dsql. For Oracle, use `__values__(table(col1, col2))` to generate `INSERT ALL INTO table (cols) VALUES (...) ... SELECT 1 FROM DUAL`. Doesn't work with MongoDB, Cassandra, or Redis. Also supports upsert (`ON CONFLICT`/`ON DUPLICATE KEY`/`MERGE`) and update via CTE
 
 ### Trees (hierarchical and graph data)
 - A `tree` block expands into one `seed` query per level (`{name}_level_{n}`), wiring each level's parent reference to the level above. Use it for org charts, category trees, nested comments, dependency graphs
@@ -988,6 +992,71 @@ hooks {
     steady(workers: workers, duration: 10m)
   }
   ```
+
+### Stage groups
+- Stages run one after another. A **group** block after a stage's options splits it into lanes that run *at the same time*, each with its own worker count, rate, ramp and query mix:
+  ```edg
+  stages {
+    warmup(duration: 1m) {
+      customers(workers: 2, weights: { check_balance: 100 })
+    }
+
+    peak(duration: 10m) {
+      customers(workers: 50, ramp_duration: 30s, weights: { check_balance: 70, make_transfer: 30 })
+      analysts(workers: 4, qps: 20, weights: { daily_report: 100 })
+      reaper(workers: 1, qps: 1, weights: { expire_holds: 100 })
+    }
+  }
+  ```
+- Reach for groups when the user describes more than one class of client against one database - OLTP alongside reporting, several tenant tiers, a background job beside the main workload. Each lane's rate limiter is its own, so a slow analytical query can't consume the OLTP budget, which a single pool and one `weights` map can't express
+- A group takes every stage option **except `duration`**, which the enclosing stage owns: `workers` (default 1), `qps` in all three forms (literal, `ramp()`, `signal()`), `ramp_duration` (must be less than the stage's `duration`), and `weights` (falls back to the top-level `weights` when omitted)
+- A stage that declares groups must not also declare `workers`, `qps`, `ramp_duration` or `weights`: those describe the single lane an ungrouped stage runs as, and groups replace it with several. Declaring both is a load-time error
+- Results are reported as `group.query` (`customers.check_balance`), so the same query run by two lanes keeps two independent sets of counts, latencies and error rates. Expectations address the identical name:
+  ```edg
+  expect {
+    oltp_is_fast    customers.check_balance.p99 < 10
+    reports_finish  analysts.daily_report.p99 < 2000
+  }
+  ```
+- A group name therefore occupies a name of its own alongside globals, run items and the built-in expectation metrics (`error_rate`, `tpm`, ...), and edg rejects a config where it would shadow one. Group names must be unique within a stage and can't be empty; groups can't nest
+- Worker ramping carries across stages **by group name**: the `customers` lane in `peak` ramps from what `customers` was running in `warmup`, not from one and not from some other lane's count. A group appearing for the first time in a later stage ramps from one
+- A stage with no group block is a single unnamed lane, exactly as before, and its rows stay unqualified. Prefer that when there's only one class of client - groups buy nothing and cost a level of naming
+- The peak concurrency of a grouped stage is the **sum** of its lanes' worker counts, which is what the connection pool has to cover. Size `--pool-size` against that sum, not against the largest lane
+
+### Run until a predicate holds (drain loops)
+- `until` is a boolean expression on a **run** query or transaction, evaluated after each execution. Once it holds, that lane stops; the stage ends when every lane carrying an `until` has stopped. The stage's `duration` stays as a cap
+- `affected()` is the count the predicate almost always tests: rows affected for an `exec`, rows returned for a `query`, summed across the arg sets and batches one query expands into. Drivers that can't report a count (Cassandra, Redis, and a transaction's queued statements) give `-1`
+- `helper: true` keeps a run item **out of the implicit mix**. Without it, a stage with no weights runs every run item in turn and a weighted stage picks one at random, so a drain query sharing the section with ordinary traffic would be interleaved with it and drain at 1/N the rate. A helper runs only where a stage's weights name it
+- Reach for this when the user describes work that finishes rather than work that runs for a fixed time: purging old rows, backfilling a new column, draining a queue, migrating in chunks. The shape is always "repeat a statement that touches at most N rows until it comes back short":
+  ```edg
+  run {
+    purge_batch(type: exec, helper: true, until: affected() < 1000)
+      `DELETE FROM events WHERE id IN (
+         SELECT id FROM events WHERE created_at < now() - INTERVAL '30 days' LIMIT 1000)`
+
+    read_order(type: query) `SELECT * FROM orders WHERE id = $1` (ref('seed_orders').id)
+  }
+
+  stages {
+    backfill(duration: 1h) {
+      drain(workers: 1, weights: { purge_batch: 100 })
+      traffic(workers: 50, weights: { read_order: 100 })
+    }
+  }
+  ```
+- Write the predicate **bare**, like `assert` and `rollback_if`. `until: "affected() < 1000"` is a string literal and fails to compile with "expected bool, but got string"
+- A lane whose weights can draw an `until` item is *primary*; one that can't is *background*. The stage ends when every primary lane has fired and cancels the background lanes with it - so the `traffic` lane above measures the latency the backfill causes and stops when there's no backfill left to measure. Two primary lanes in one stage each run to completion, so parallel drains don't cut each other short
+- Both options are rejected outside a `run` block and on a query nested inside a transaction. Put them on the transaction, whose `affected()` then covers every statement it ran:
+  ```edg
+  run {
+    transaction drain(helper: true, until: affected() < 1000) {
+      purge_events(type: exec) `DELETE FROM events WHERE id IN (SELECT id FROM events WHERE ts < $1 LIMIT 1000)` (cutoff)
+      purge_index(type: exec)  `DELETE FROM event_index WHERE event_id NOT IN (SELECT id FROM events)`
+    }
+  }
+  ```
+- `edg doctor` warns about a helper no weights block ever names: nothing can schedule it, so it never runs
+- Without stages there's no lane to end, so a predicate that holds ends the run, capped by `--duration`
 
 ### Per-run environment
 - `env('NAME')` errors when `NAME` is unset; `env_nil('NAME')` returns nil, so pair it with `coalesce()` to supply a default
@@ -1501,6 +1570,18 @@ deseed { clean_users `DELETE FROM users` }
 down { drop_users `DROP TABLE IF EXISTS users` }
 ```
 
+### libsql
+
+libSQL (Turso) is a SQLite fork with a server in front of it. Everything in the `sqlite` section above applies to the SQL - write the config as if the target were SQLite - and only the connection and the concurrency behaviour differ.
+
+- **URL**: `libsql://db-org.turso.io?authToken=TOKEN` for Turso, or `http://127.0.0.1:8080` / `ws://...` for a self-hosted sqld. `https://`, `http://`, `wss://` and `ws://` all work. The driver rejects unknown query parameters, so the SQLite `_pragma=` settings must not be passed
+- **No busy tuning**: the server queues concurrent writers instead of refusing them, so a multi-worker write workload needs none of SQLite's WAL/`busy_timeout`/`_txlock` settings and never sees `SQLITE_BUSY`. Write contention shows up as latency
+- **Every statement is a round trip**: there is no local file, so throughput against a remote Turso database measures the network as well as the database
+- **Database name**: `main`, as in SQLite, for `edg init --database`
+- **Local files**: a `file:` URL works but just opens the embedded engine - use `--driver sqlite` for that
+
+The config is identical to the `sqlite` example above; only `--driver libsql --url "libsql://..."` changes.
+
 ### redis
 
 Redis queries are commands, written as you'd type them into `redis-cli`. There is no schema and no SQL.
@@ -1623,7 +1704,7 @@ edg init --driver dsql --url "clusterid.dsql.us-east-1.on.aws" --schema public >
 edg init --driver sqlite --url "file:edg.db" --database main > workload.edg
 ```
 
-The `--schema` and `--database` flags are interchangeable. Use `--schema` for drivers where the value is a schema name (pgx, dsql, mssql, oracle) and `--database` for drivers where it's a database name (mysql, sqlite).
+The `--schema` and `--database` flags are interchangeable. Use `--schema` for drivers where the value is a schema name (pgx, dsql, mssql, oracle) and `--database` for drivers where it's a database name (mysql, sqlite, libsql).
 
 Redis has no schema to inspect, so `edg init` doesn't support it. Use `edg scaffold` instead, which generates a config from a table/column description rather than a live database.
 
@@ -1701,7 +1782,7 @@ Don't generate configs with these errors:
 | Mixing named and positional args in one query | Mutually exclusive - use map-style OR list-style, not both | Pick one form per query |
 | `seq_global("name")` without a `seq` declaration | Sequence doesn't exist at runtime | Add a top-level `seq name(start: 1, step: 1)` declaration |
 | `count`/`size` on non-batch query types | Only valid for batch operations | Add batch count/size as query options |
-| `__values__` with MongoDB, Cassandra, or Redis | Only works with SQL drivers (pgx, mysql, mssql, oracle, spanner, sqlite, dsql) | Use single-document inserts for MongoDB, standard CQL for Cassandra, one command per row for Redis |
+| `__values__` with MongoDB, Cassandra, or Redis | Only works with SQL drivers (pgx, mysql, mssql, oracle, spanner, sqlite, libsql, dsql) | Use single-document inserts for MongoDB, standard CQL for Cassandra, one command per row for Redis |
 | `weights` referencing nonexistent run item | Key must match a query name in `run` section | Fix name or add matching run query |
 | `rollback` outside a transaction | `rollback` only valid inside transactions | Use `noop` or remove the entry |
 | Standalone `if`/`match` with `weights` | Conditional blocks can't be weighted | Remove conditionals from weighted run or remove `weights` |

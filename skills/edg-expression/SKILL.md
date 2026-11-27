@@ -223,6 +223,7 @@ Every aggregate (`sum`, `avg`, `min`, `max`, `median`, `stddev`, `variance`, `pe
 | `env_nil(name)` | Job environment variable (`--env`/`--env-file`), falling back to the OS environment (nil if missing) |
 | `result()` | First row of current query's SELECT result (post_print only) |
 | `results()` | All rows of current query's SELECT result as []map (post_print only) |
+| `affected()` | Rows the current query touched: affected for `exec`, returned for `query`, summed across its arg sets and batches. Post-execution only (`until`, `post_print`). `-1` where the driver reports no count (Cassandra, Redis, a transaction's queued statements). Drives drain loops: `until: affected() < 1000` |
 | `cond(pred, trueVal, falseVal)` | Ternary conditional (inline, for args) |
 | `nullable(expr, probability)` | NULL with given probability |
 | `coalesce(v1, v2, ...)` | First non-nil value |
